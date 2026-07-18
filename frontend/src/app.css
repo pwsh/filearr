@@ -1,0 +1,35 @@
+@import "tailwindcss";
+
+/* Theme tokens — dark mode via .dark on <html>, accent user-configurable */
+@theme {
+  --color-accent: var(--accent, #6366f1);
+}
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+html {
+  /* Root fix (FIX-13): bind color-scheme to the active theme so native widgets
+     (select popups, <option>/datalist lists, date/time pickers, scrollbars,
+     checkboxes) render with the correct light/dark chrome instead of the
+     browser's light default. Without this, themed near-white text landed on a
+     white native popup background and was unreadable in dark mode. */
+  color-scheme: light;
+  @apply bg-white text-slate-900;
+}
+html.dark {
+  color-scheme: dark;
+  @apply bg-slate-950 text-slate-100;
+}
+
+/* Belt-and-suspenders (FIX-13): explicitly theme option/optgroup lists so they
+   stay readable even on engines that ignore color-scheme for the option popup.
+   Selects across the app use bg-transparent + inherited text, so their popups
+   otherwise fall back to the browser default. */
+select option,
+select optgroup {
+  @apply bg-white text-slate-900;
+}
+html.dark select option,
+html.dark select optgroup {
+  @apply bg-slate-900 text-slate-100;
+}

@@ -1,0 +1,97 @@
+# Filearr — Caddy, ACME-DNS mode (FILEARR_TLS_MODE=acme-dns / P5-T6 agent mTLS).
+#
+# The CT terminates PUBLIC TLS itself — no external nginx in the path. A single
+# wildcard cert (*.<domain>) is obtained from Let's Encrypt via the Cloudflare
+# DNS-01 challenge (no inbound :80 / HTTP-01 needed; works behind NAT), and three
+# hostnames are served off port 443:
+#
+#   filearr.<domain>  -> the web UI / API                     (reverse_proxy app:8000)
+#   agents.<domain>   -> the agent plane, mTLS REQUIRED       (reverse_proxy app:8000)
+#   ca.<domain>       -> step-ca, RAW SNI/L4 passthrough      (proxy -> step-ca:9000)
+#
+# Env parameters (from .env; the deploy script prompts/generates them):
+#   FILEARR_ACME_EMAIL          ACME account email (LE expiry notices)
+#   FILEARR_TLS_DOMAIN          the apex zone, e.g. example.com
+#   CLOUDFLARE_API_TOKEN        scoped token: Zone:DNS:Edit on the zone (SECRET)
+#   FILEARR_PROXY_SHARED_SECRET shared secret the backend trusts (SECRET)
+{
+	email {$FILEARR_ACME_EMAIL}
+
+	# --- L4 / HTTP coexistence on :443 -------------------------------------
+	# The step-ca renew handshake authenticates with the agent's CLIENT cert on
+	# the DIRECT TLS connection; an L7 terminator silently breaks it (§7.4). So
+	# the CA hostname must be passed through RAW. caddy-l4's `layer4` LISTENER
+	# WRAPPER runs first on the HTTPS listener: it peeks the TLS ClientHello
+	# WITHOUT terminating and, when the SNI is ca.<domain>, raw-TCP-proxies the
+	# whole connection to step-ca (which keeps its own TLS). Every other
+	# connection falls through to the `tls` wrapper, where the HTTP app terminates
+	# TLS and host-routes normally. This is the l4/http coexistence mechanism
+	# (HTTP app == default fallback); verified with `caddy validate` + local E2E.
+	servers :443 {
+		listener_wrappers {
+			layer4 {
+				@ca tls sni ca.{$FILEARR_TLS_DOMAIN}
+				route @ca {
+					proxy {
+						upstream step-ca:9000
+					}
+				}
+			}
+			tls
+		}
+	}
+}
+
+# Wildcard site: obtains + holds the single *.<domain> LE cert (DNS-01) and
+# serves the web UI. `agents.<domain>` is carved out to its own block below (a
+# more-specific site address wins), so mTLS applies THERE only — never to the
+# browser-facing UI. Any other subdomain gets an explicit 404 rather than the app.
+*.{$FILEARR_TLS_DOMAIN} {
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+		# Split-horizon guard: the DNS-01 propagation SELF-CHECK must query
+		# public resolvers. A LAN resolver that overrides this zone (e.g. an
+		# OPNsense/Unbound host-override for the domain) answers from its
+		# local view, never sees the _acme-challenge TXT, and issuance times
+		# out with "timed out waiting for record to fully propagate" even
+		# though Cloudflare published it. (Live incident 2026-07-17.)
+		resolvers 1.1.1.1:53 8.8.8.8:53
+	}
+
+	@filearr host filearr.{$FILEARR_TLS_DOMAIN}
+	handle @filearr {
+		encode zstd gzip
+		reverse_proxy app:8000
+	}
+
+	# Unknown subdomain: do not silently serve the app.
+	handle {
+		respond "filearr: unknown host" 404
+	}
+}
+
+# Agent plane — mTLS ENFORCED. Caddy verifies the client cert against the step-ca
+# root (require_and_verify) and forwards the ALREADY-VERIFIED identity to the
+# backend as trusted headers, guarded by the shared secret so the backend only
+# trusts them when the request demonstrably transited this proxy. The backend's
+# _authenticate_agent (FILEARR_AGENT_AUTH_MODE=mtls-header|both) consumes them:
+#   X-Filearr-Agent-San  the first DNS SAN == str(agent_id)  (renewal-proof identity)
+#   X-Filearr-Agent-Fp   the client cert fingerprint          (secondary check)
+#   X-Filearr-Proxy-Auth the shared secret                    (trust gate)
+# The cert is the wildcard obtained above (agents.<domain> is covered by *.<domain>).
+agents.{$FILEARR_TLS_DOMAIN} {
+	tls {
+		dns cloudflare {$CLOUDFLARE_API_TOKEN}
+		resolvers 1.1.1.1:53 8.8.8.8:53
+		client_auth {
+			mode require_and_verify
+			trust_pool file /step-root/certs/root_ca.crt
+		}
+	}
+
+	reverse_proxy app:8000 {
+		header_up X-Filearr-Agent-Fp {http.request.tls.client.fingerprint}
+		header_up X-Filearr-Agent-San {http.request.tls.client.san.dns_names.0}
+		header_up X-Filearr-Proxy-Auth {$FILEARR_PROXY_SHARED_SECRET}
+	}
+}

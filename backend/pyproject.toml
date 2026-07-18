@@ -1,0 +1,176 @@
+[project]
+name = "filearr"
+version = "0.1.0"
+description = "Unified self-hosted media catalog and search"
+license = "AGPL-3.0-or-later"
+license-files = ["../LICENSE"]
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    # Web — FastAPI >=0.135 for native SSE (fastapi.sse), pinned current stable
+    "fastapi==0.139.0",
+    "uvicorn[standard]==0.50.2",
+    # Validation / config
+    "pydantic==2.13.4",
+    "pydantic-settings==2.14.2",
+    # Database — psycopg3 (recommended async driver for new SQLAlchemy projects)
+    "sqlalchemy[asyncio]==2.0.51",
+    "psycopg[binary]==3.3.4",
+    "alembic==1.18.5",
+    # Jobs — Postgres-native queue (no Redis); 3.9 adds middleware, priorities, cron
+    "procrastinate==3.9.0",
+    # Cron evaluation for per-library scan_cron (croniter is EOL — do not use it)
+    "cronsim==2.7",
+    # Search — async-first community SDK (official client is sync-only)
+    "meilisearch-python-sdk==7.2.3",
+    # Extraction
+    "mutagen==1.47.0",
+    "pillow==12.3.0",
+    "pymediainfo==7.0.1",
+    "python-magic==0.4.27",
+    # Defensive XML parsing for untrusted Kodi NFO sidecars (T3)
+    "defusedxml==0.7.1",
+    "guessit==4.1.0",
+    "tinytag==2.2.1",
+    "xxhash==3.8.1",
+    "trimesh>=4.12.2,<5",
+    "numpy-stl==4.0.0",
+    "pypdf==6.14.2",
+    # P12-T5 PDF first-page thumbnails: pypdfium2 is the Apache-2.0 / BSD-3-Clause
+    # Python binding over Google PDFium (bundled libpdfium is BSD-style) -- both
+    # AGPL-compatible, no copyleft obligation. Chosen over pdftoppm (GPL
+    # poppler-utils CLI): in-process, no per-file subprocess, cleaner license.
+    # The manylinux wheel BUNDLES libpdfium, so NO apt package is added to the
+    # image. Pinned to the newest patched release (verified 2026-07-16 against the
+    # LIVE GitHub Advisory DB + OSV -- ZERO advisories for pypdfium2; 5.12.0 also
+    # bundles the most-recent PDFium C build, the best security posture).
+    "pypdfium2==5.12.0",
+    "python-docx==1.2.0",
+    "openpyxl==3.1.5",
+    "soundfile==0.14.0",
+    # IO / misc
+    "httpx==0.28.1",
+    # Phase 8 alerting (P8-T4): AES-GCM envelope encryption of channel secrets
+    # (SMTP password, webhook HMAC secret). Apache-2.0/BSD, no AGPL friction.
+    "cryptography==48.0.0",
+    # Phase 6 identity/auth (P6-T1): argon2id password hashing for LOCAL
+    # accounts only (federated providers delegate credential checks to the IdP).
+    # Distinct trust model from API keys (research §1.1): a human password is
+    # low-entropy and needs a slow, memory-hard KDF — never the sha256-at-rest
+    # pattern. MIT-licensed, ships a manylinux abi3 wheel (no compiler needed).
+    "argon2-cffi==25.1.0",
+    # Phase 6 P6-T5 (OIDC SSO): Authlib as the OpenID-Connect relying party
+    # (authorization-code + PKCE, JWKS ID-token validation). BSD-3-Clause.
+    # R5 pin re-verified against the LIVE GitHub advisory list at implementation
+    # (2026-07-13): the newest advisory GHSA-w8p2-r796-3vmq (2026-06-08) is
+    # patched only in 1.6.10/1.7.1, so the floor moves UP from the brief's
+    # >=1.6.9 to >=1.7.1 (resolves to 1.7.2). Pulls joserfc (JOSE backend).
+    "authlib>=1.7.1",
+    # Phase 6 P6-T6 (LDAP/AD bind auth): ldap3 as the directory client. LGPL-v3
+    # library-usage is AGPL-compatible. A DELIBERATE override of the research
+    # doc's python-ldap preference (docs/ops/auth.md § "LDAP library choice"):
+    # ldap3 is pure-Python (no libldap/C toolchain), carries NO known CVEs
+    # (GitHub Advisory + PyPI checked live 2026-07-13), and ships an offline
+    # MOCK_SYNC strategy that lets the security-critical injection/bind/group
+    # matrix run network-free in CI — python-ldap has no offline harness. ldap3
+    # is frozen at 2.9.1 (2021); LDAPv3 bind/search is itself a frozen protocol,
+    # so a stable-but-unmaintained client is an accepted maintenance (not vuln)
+    # risk, and the directory I/O is isolated behind ldap_auth.connect for a
+    # localized future swap.
+    "ldap3==2.9.1",
+    "xlsxwriter==3.2.9",
+    "watchfiles==1.2.0",
+    # Phase 2 indexing controls (roadmap §4): gitignore-fidelity exclude
+    # matching engine for preset bundles. Weak-copyleft MPL-2.0 (AGPL-safe).
+    # Runtime dep now (the decided engine); wired into scan.py by P2-T1.
+    "pathspec==1.1.1",
+    # P3-T8 semantic search: local ONNX embedder. FIX-7 (2026-07-12) replaced
+    # fastembed with a DIRECT onnxruntime path: fastembed 0.7.x pins pillow<12
+    # (unsatisfiable vs our pillow==12.3.0; pillow 11.x carries CVE-2026-25990 —
+    # downgrade forbidden) and its main-branch relaxation has NO release
+    # (qdrant/fastembed#606). filearr.embed now reproduces fastembed's exact
+    # BAAI/bge-small-en-v1.5 pipeline (Qdrant/bge-small-en-v1.5-onnx-Q,
+    # model_optimized.onnx; CLS pooling + L2 normalize) over these primitives.
+    # All lazy-imported so they load only when FILEARR_SEMANTIC_ENABLED=true; the
+    # test suite mocks the seam out entirely. onnxruntime pulls numpy (compatible
+    # with the numpy-stl pin — both accept numpy 2.x).
+    "onnxruntime==1.27.0",
+    "tokenizers==0.23.1",
+    "huggingface-hub==1.23.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff==0.15.20",
+    "pytest>=8",
+    "pytest-asyncio>=0.25",
+    # test harness: ffmpeg/ffprobe binaries + an OPTIONAL embedded Postgres.
+    # pgserver is a LOCAL fallback only (Python <=3.12: it ships no cp313 wheel);
+    # CI and py3.13 point FILEARR_TEST_DATABASE_URL at a real postgres:18 service.
+    "pgserver>=0.1.4; python_version < '3.13'",
+    "static-ffmpeg>=2.7",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+# Autogenerated Alembic migrations are not hand-formatted (long inline column
+# DDL, import order set by the autogenerate template); linting them adds churn.
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+# B008: FastAPI's canonical dependency-injection idiom is `param = Depends(...)`
+# in the function signature default; ruff flags every route. Accepted project-wide.
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# `class X(str, enum.Enum)` is a deliberate, load-bearing choice: SQLAlchemy's
+# Enum column + JSON/Meili serialization rely on the mixed-in `str` behaviour;
+# migrating to `enum.StrEnum` changes `str(member)` semantics. Kept intentionally.
+"filearr/models.py" = ["UP042"]
+# rbac.py's `Role(str, enum.Enum)` follows the same deliberate str-mixin pattern
+# (Phase 6 global-role enum; serializes like the other enums when wired in).
+"filearr/rbac.py" = ["UP042"]
+# Long extension-map data rows read better on one line than wrapped.
+"filearr/media_types.py" = ["E501"]
+# Alembic scaffolding: env.py import ordering.
+"alembic/env.py" = ["I001"]
+# init_db inserts BACKEND_DIR on sys.path *before* importing `filearr`, so its
+# imports intentionally follow module-level statements (E402); long DDL/log lines.
+"scripts/init_db.py" = ["E402", "E501", "I001"]
+# Test helpers legitimately take a `timeout` kwarg (SSE stream readers); ASYNC109
+# forbids it in favour of asyncio.timeout, but these are plain sync-signature
+# helper coroutines where an explicit arg is clearer.
+"tests/test_scan_sse.py" = ["ASYNC109"]
+# UI-T4 browser tests compute expected real paths with os.path in async test
+# bodies; that is test-side path math, not blocking runtime I/O on the loop.
+"tests/test_fs_browse_ui_t4.py" = ["ASYNC240"]
+# S12 thumbnail tests check on-disk cache files with os.path in async test bodies
+# (verifying GC file reclamation) -- test-side filesystem assertions, not loop I/O.
+"tests/test_thumbnails_p12.py" = ["ASYNC221", "ASYNC230", "ASYNC240"]
+# S12 thumbnail cache manager: its job IS local filesystem work (stat/walk/remove
+# under /config/thumbnails). The sync os.path/os I/O in these task coroutines is
+# deliberate + bounded (small local config volume, research §1), mirroring the
+# accepted sync-file-IO-in-tasks convention in extract.py.
+"filearr/tasks/thumbs.py" = ["ASYNC240"]
+# P11 background exports write/read bounded artifact files under {config_dir}/
+# exports (and a capped email attachment). The sync os.path / open() in these
+# coroutines is deliberate + bounded local filesystem work, same accepted
+# convention as tasks/thumbs.py above (research §6/§7 artifact staging).
+"filearr/exports.py" = ["ASYNC230", "ASYNC240"]
+"filearr/report_delivery.py" = ["ASYNC230", "ASYNC240"]
+# xlsx_response assembles the workbook to a bounded temp file then streams it;
+# download endpoints stat the local artifact path.
+"filearr/api/reports.py" = ["ASYNC230"]
+"filearr/api/exports.py" = ["ASYNC240"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["filearr"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>Filearr — local search</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <header class="topbar">
+    <h1>Filearr <span class="sub">local search</span></h1>
+    <span id="index-status" class="status" aria-live="polite"></span>
+  </header>
+
+  <div id="banner-stale" class="banner banner-warn" hidden>
+    Policy is stale (past its offline-grace window). Results reflect the
+    last-known path scope; the web UI shuts down when the cache expires.
+  </div>
+  <div id="banner-scope" class="banner banner-info" hidden>
+    <strong>Restricted view:</strong> results are path-scope filtered.
+    <span id="scope-preds"></span>
+  </div>
+
+  <main>
+    <form id="search-form" autocomplete="off">
+      <input
+        id="q"
+        type="search"
+        name="q"
+        placeholder="search filenames &amp; paths — e.g. kind:video size:&gt;1G modified:&lt;7d"
+        aria-label="Search query"
+        spellcheck="false"
+        autofocus>
+    </form>
+    <p class="hint">
+      Local search is <strong>trigram / substring</strong> based and is
+      <strong>not</strong> typo-tolerant the way central search is. A zero-result
+      search here does not mean the file is missing — try central search for
+      ranked, typo-tolerant results. Add <code>~</code> to a term for a bounded
+      fuzzy match.
+    </p>
+
+    <div id="meta" class="meta" aria-live="polite"></div>
+    <div id="error" class="error" hidden></div>
+
+    <table id="results" hidden>
+      <thead>
+        <tr>
+          <th class="col-path">Path</th>
+          <th class="col-size">Size</th>
+          <th class="col-mod">Modified</th>
+          <th class="col-kind">Kind</th>
+          <th class="col-copy"></th>
+        </tr>
+      </thead>
+      <tbody id="results-body"></tbody>
+    </table>
+
+    <p id="empty" class="empty" hidden>No results.</p>
+  </main>
+
+  <footer class="footer">
+    Read-only · same-machine only ·
+    search history stays on this machine and is never sent to the central server.
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

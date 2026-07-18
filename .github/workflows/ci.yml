@@ -1,0 +1,195 @@
+name: ci
+
+# CI gate: lint + backend tests + frontend check + alembic drift must all pass
+# BEFORE the docker image is built. The `image` build here is a no-push
+# validation only (release publishing lives in build.yml, on main/tags).
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: backend (lint + tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        # The integration tests need a real Postgres. pgserver (the local
+        # embedded fallback) ships no cp313 wheel, so on the 3.13 CI runner we
+        # point FILEARR_TEST_DATABASE_URL at this service instead; conftest's
+        # _PGProvider hands out an isolated database per test module. Postgres 18
+        # provides native uuidv7() (the conftest shim is a no-op on it).
+        image: postgres:18
+        env:
+          POSTGRES_USER: filearr
+          POSTGRES_PASSWORD: filearr
+          POSTGRES_DB: filearr
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U filearr"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # conftest's _PGProvider uses this as the admin URI (CREATEDB rights) and
+      # creates one throwaway database per test module off it.
+      FILEARR_TEST_DATABASE_URL: postgresql://filearr:filearr@localhost:5432/filearr
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install ffmpeg (ffprobe) + media libs for extractors
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ffmpeg libmagic1 libmediainfo0v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies (incl. dev group)
+        run: uv sync --dev
+
+      - name: Ruff (lint gate)
+        run: uv run ruff check .
+
+      - name: Pytest
+        run: uv run pytest -q
+
+  frontend:
+    name: frontend (svelte-check + build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v6
+        with:
+          # Matches the Dockerfile's `node:24-slim` build stage.
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install (clean, lockfile-exact)
+        run: npm ci
+
+      - name: Type/component check
+        run: npm run check
+
+      - name: Build
+        run: npm run build
+
+  agent:
+    name: agent (go vet + test + cross-compile)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: agent/go.mod
+          cache-dependency-path: agent/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      # Protocol tests run a real step-ca authority in-process (smallstep/
+      # certificates is a library) — no service container needed.
+      - name: Test
+        run: go test ./...
+
+      - name: Cross-compile matrix (static, no cgo)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /dev/null ./cmd/filearr-agent
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/filearr-agent
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/filearr-agent
+
+  alembic-check:
+    name: alembic drift check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        # Postgres 18 provides native uuidv7(); the baseline migration requires
+        # it (fails fast otherwise) and the ORM server defaults call it, so we
+        # deliberately run the real 18 image rather than shimming an older one.
+        image: postgres:18
+        env:
+          POSTGRES_USER: filearr
+          POSTGRES_PASSWORD: filearr
+          POSTGRES_DB: filearr
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U filearr"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # env.py resolves the DB URL from FILEARR_DATABASE_URL via filearr.config.
+      FILEARR_DATABASE_URL: postgresql+psycopg://filearr:filearr@localhost:5432/filearr
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Upgrade DB to head
+        run: uv run alembic upgrade head
+
+      - name: Check models match migrations (no drift)
+        # Fails if the SQLAlchemy models have diverged from the migration chain
+        # (i.e. someone changed models.py without generating a migration).
+        run: uv run alembic check
+
+  image:
+    name: docker image (no push)
+    runs-on: ubuntu-latest
+    # True gate: only build the image once lint, tests, frontend, and migration
+    # drift have all passed.
+    needs: [backend, frontend, alembic-check]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v4
+      - name: Build multi-stage image (validation only, no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

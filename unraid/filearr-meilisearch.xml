@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>filearr-meilisearch</Name>
+  <Repository>getmeili/meilisearch:v1.49.0</Repository>
+  <Registry>https://hub.docker.com/r/getmeili/meilisearch</Registry>
+  <Network>filearr</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/CHANGEME/filearr/discussions</Support>
+  <Project>https://www.meilisearch.com/</Project>
+  <Overview>Meilisearch for filearr — typo-tolerant instant-search engine. The index is a DISPOSABLE projection: it can always be rebuilt from Postgres via filearr's rebuild task, so no backup is strictly required. Pinned to v1.48.3 (includes fixes for CVE-2026-57823/57824 — do not run older 1.48.x/1.47.0 or floating 'latest').&#13;&#10;&#13;&#10;Install before the filearr container. Requires the user-defined Docker network 'filearr':  docker network create filearr</Overview>
+  <Category>Other:</Category>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/meilisearch/meilisearch/main/assets/logo.svg</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <Requires>docker network 'filearr'</Requires>
+  <Config Name="Data" Target="/meili_data" Default="/mnt/user/appdata/filearr-meilisearch" Mode="rw" Description="Index data. Keep on cache/appdata (fast pool) — search latency depends on it." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/filearr-meilisearch</Config>
+  <Config Name="MEILI_MASTER_KEY" Target="MEILI_MASTER_KEY" Default="" Mode="" Description="Master key (16+ chars) — must match FILEARR_MEILI_MASTER_KEY in filearr and filearr-worker" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="MEILI_NO_ANALYTICS" Target="MEILI_NO_ANALYTICS" Default="true" Mode="" Description="Disable telemetry" Type="Variable" Display="advanced" Required="false" Mask="false">true</Config>
+  <Config Name="MEILI_ENV" Target="MEILI_ENV" Default="production" Mode="" Description="production hides the built-in preview UI; requires master key" Type="Variable" Display="advanced" Required="false" Mask="false">production</Config>
+  <Config Name="Port (optional)" Target="7700" Default="" Mode="tcp" Description="Only map for direct debugging of the search engine. Leave empty otherwise." Type="Port" Display="advanced" Required="false" Mask="false"/>
+</Container>

@@ -1,0 +1,46 @@
+__pycache__/
+*.pyc
+.venv/
+.venv312/
+.pytest_cache/
+.ruff_cache/
+node_modules/
+dist/
+site/
+.env
+/config/
+uv.lock
+deploy.conf
+dumps/
+
+# Git-bundle backups + one-off recovery notes stay local, never published.
+*.bundle
+*.bundle.lock
+RECOVERY-*
+*.applied
+
+# Development-internal archive: files retired from the public tree are parked
+# here, mirroring the main project structure, in case something was moved by
+# mistake. Local-only by design.
+/archive/
+
+# Local context / research docs (not for publication)
+CLAUDE.md
+Media-Library-Solution-Research.md
+Unified-Search-Build-Plan.md
+
+# P5-T7 agent release signing — the Ed25519 PRIVATE key NEVER enters the repo.
+# It lives in ~/.filearr-signing (or %USERPROFILE%\.filearr-signing) outside the
+# tree; these guards catch a key accidentally created/copied inside the repo.
+.filearr-signing/
+filearr-release.key
+*.filearr-signing.key
+# Built agent release artifacts + signed manifests (staged locally before upload).
+/agent/dist/
+manifest.json
+manifest.json.sig
+# Ad-hoc agent binaries built at the module root (copy-to-device workflow).
+/agent/filearr-agent
+/agent/filearr-agent.exe
+/agent/filearr-release
+/agent/filearr-release.exe

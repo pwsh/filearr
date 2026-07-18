@@ -1,0 +1,89 @@
+site_name: Filearr
+site_description: >-
+  Self-hosted unified file & media catalog with typo-tolerant instant search,
+  a Postgres source of truth, a disposable Meilisearch projection, and an
+  optional distributed-agent fleet.
+site_url: https://pwsh.github.io/filearr/
+repo_url: https://github.com/pwsh/filearr
+repo_name: pwsh/filearr
+copyright: >-
+  Filearr is free software under the GNU AGPL-3.0-or-later.
+  Network use requires offering Corresponding Source (AGPL section 13).
+
+docs_dir: docs-site
+strict: true
+
+theme:
+  name: material
+  language: en
+  icon:
+    repo: fontawesome/brands/github
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+    - search.suggest
+    - search.highlight
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+nav:
+  - Home: index.md
+  - Setup requirements: setup.md
+  - Deployment:
+      - deployment/index.md
+      - Docker Compose: deployment/docker-compose.md
+      - Unraid: deployment/unraid.md
+      - Proxmox LXC: deployment/proxmox.md
+      - Upgrades & migrations: deployment/upgrades.md
+  - Distributed agents: agents.md
+  - Security: security.md
+  - Data collected & how: data-collection.md
+  - Operations & recovery: operations.md
+  - Reference:
+      - Configuration: reference/configuration.md
+      - API: reference/api.md
+      - Development: reference/development.md

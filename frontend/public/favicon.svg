@@ -1,0 +1,7 @@
+<svg viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+  <!-- Filearr mark: folder (accent, two-tone) + magnifying-glass cutout -->
+  <rect x="10" y="10" width="20" height="10" rx="3" fill="#4338ca"/>
+  <rect x="6" y="18" width="52" height="34" rx="6" fill="#6366f1"/>
+  <circle cx="40" cy="38" r="9" fill="none" stroke="#ffffff" stroke-width="5"/>
+  <line x1="46.5" y1="44.5" x2="54" y2="52" stroke="#ffffff" stroke-width="6" stroke-linecap="round"/>
+</svg>

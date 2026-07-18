@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>filearr</Name>
+  <Repository>ghcr.io/CHANGEME/filearr:latest</Repository>
+  <Registry>https://ghcr.io/CHANGEME/filearr</Registry>
+  <Network>filearr</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/CHANGEME/filearr/discussions</Support>
+  <Project>https://github.com/CHANGEME/filearr</Project>
+  <Overview>Unified media catalog and typo-tolerant search over mixed libraries (video, music, audiobooks, samples, images, 3D models, documents, spreadsheets). Scans filesystems directly; Postgres is the source of truth, Meilisearch a rebuildable search projection. Public REST API for search and metadata updates.&#13;&#10;&#13;&#10;REQUIRES: the filearr-postgres and filearr-meilisearch containers (install first), and a user-defined Docker network named 'filearr' so containers resolve each other by name. Create it once in the Unraid terminal:  docker network create filearr&#13;&#10;&#13;&#10;After first start, initialise the database once from the container console:  python scripts/init_db.py</Overview>
+  <Category>MediaApp:Other Tools:Utilities</Category>
+  <WebUI>http://[IP]:[PORT:8484]/</WebUI>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/CHANGEME/filearr/main/frontend/public/icon.png</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <Requires>filearr-postgres, filearr-meilisearch, docker network 'filearr'</Requires>
+  <Config Name="WebUI Port" Target="8000" Default="8484" Mode="tcp" Description="Web interface / API port" Type="Port" Display="always" Required="true" Mask="false">8484</Config>
+  <Config Name="Config" Target="/config" Default="/mnt/user/appdata/filearr" Mode="rw" Description="App data: thumbnails, caches" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/filearr</Config>
+  <Config Name="Media" Target="/data/media" Default="/mnt/user/data/media" Mode="ro" Description="Media library root (read-only; filearr never modifies files in v1)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data/media</Config>
+  <Config Name="Database URL" Target="FILEARR_DATABASE_URL" Default="postgresql+psycopg://filearr:change-me-too@filearr-postgres:5432/filearr" Mode="" Description="SQLAlchemy DSN (psycopg driver). Password must match filearr-postgres." Type="Variable" Display="always" Required="true" Mask="false">postgresql+psycopg://filearr:change-me-too@filearr-postgres:5432/filearr</Config>
+  <Config Name="Procrastinate DSN" Target="FILEARR_PROCRASTINATE_DSN" Default="postgresql://filearr:change-me-too@filearr-postgres:5432/filearr" Mode="" Description="Plain Postgres DSN for the job queue (same DB, no driver prefix)" Type="Variable" Display="always" Required="true" Mask="false">postgresql://filearr:change-me-too@filearr-postgres:5432/filearr</Config>
+  <Config Name="Meilisearch URL" Target="FILEARR_MEILI_URL" Default="http://filearr-meilisearch:7700" Mode="" Description="Meilisearch endpoint" Type="Variable" Display="always" Required="true" Mask="false">http://filearr-meilisearch:7700</Config>
+  <Config Name="Meilisearch Master Key" Target="FILEARR_MEILI_MASTER_KEY" Default="" Mode="" Description="Must match filearr-meilisearch MEILI_MASTER_KEY" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="Auth Enabled" Target="FILEARR_AUTH_ENABLED" Default="true" Mode="" Description="Bearer API-key auth. Set false only on a fully trusted LAN." Type="Variable" Display="always" Required="false" Mask="false">true</Config>
+  <Config Name="Recycle Retention Days" Target="FILEARR_RECYCLE_RETENTION_DAYS" Default="30" Mode="" Description="Days trashed items are kept before scheduled purge" Type="Variable" Display="advanced" Required="false" Mask="false">30</Config>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID (Unraid default: 99/nobody)" Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID (Unraid default: 100/users)" Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="TZ" Target="TZ" Default="Etc/UTC" Mode="" Description="Timezone (affects scan schedules)" Type="Variable" Display="advanced" Required="false" Mask="false">Etc/UTC</Config>
+</Container>

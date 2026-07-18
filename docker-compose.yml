@@ -1,0 +1,248 @@
+name: filearr
+
+services:
+  app:
+    build: .
+    image: filearr:local
+    restart: unless-stopped
+    ports:
+      - "8484:8000"
+    env_file: .env
+    volumes:
+      - ./config:/config
+      # long-form bind with rslave: if the FUSE/SMB mount under this path is
+      # remounted on the host, running containers see the NEW mount instead of
+      # a dead endpoint (fixes OSError: EIO after rclone restarts)
+      - type: bind
+        source: ${MEDIA_PATH:-/mnt/user/data/media}
+        target: /data/media
+        read_only: true
+        bind:
+          propagation: rslave
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+
+  # OPS-T1 / P5-T6: TLS reverse proxy (Caddy sidecar) in front of `app`.
+  #
+  # Two mutually-exclusive configs, selected by FILEARR_CADDYFILE (deploy script
+  # sets it from FILEARR_TLS_MODE):
+  #   Caddyfile.internal (default) — self-signed *internal* CA (LAN/homelab; no
+  #     ACME/DNS). Today's behaviour; a plain `docker compose up` stays on this.
+  #   Caddyfile.acme — Let's Encrypt wildcard via Cloudflare DNS-01, PLUS the
+  #     agents.<domain> mTLS site and the ca.<domain> raw-L4 passthrough. Needs
+  #     the custom image (Cloudflare DNS + layer4 plugins) built below and the
+  #     step-ca root mounted (via the shared stepca_data volume) for client_auth.
+  #
+  # The image is now BUILT (not pulled) because the acme config needs plugins the
+  # stock image lacks; the internal config runs on the same binary unchanged.
+  # The whole docker/caddy dir is mounted (both Caddyfiles) and the config is
+  # chosen at `caddy run` time. caddy_data holds the CA/issued+LE certs.
+  # Published TLS ports: 8443 (compat, unchanged) + 443 (new; acme mode). The
+  # Proxmox deploy overrides 8443 -> ${WEB_TLS_PORT} via docker-compose.override.yml.
+  caddy:
+    build:
+      context: .
+      dockerfile: docker/caddy/Dockerfile
+    image: filearr-caddy:local   # xcaddy: caddy 2.11.4 + cloudflare v0.2.4 + caddy-l4 v0.1.2
+    restart: unless-stopped
+    env_file: .env               # FILEARR_TLS_DOMAIN / *_ACME_EMAIL / CLOUDFLARE_API_TOKEN / *_PROXY_SHARED_SECRET
+    ports:
+      - "8443:443"
+      - "443:443"
+    command: >-
+      caddy run --adapter caddyfile
+      --config /etc/caddy/${FILEARR_CADDYFILE:-Caddyfile.internal}
+    volumes:
+      - ./docker/caddy:/etc/caddy:ro          # both Caddyfiles; config chosen via command
+      - caddy_data:/data       # internal CA root + LE/issued leaf certs (persist across restarts)
+      - caddy_config:/config   # Caddy autosave state
+      # step-ca root for the agents.<domain> mTLS trust_pool. Shared read-only
+      # from the step-ca container's volume (empty in internal mode — harmless;
+      # only Caddyfile.acme references /step-root/certs/root_ca.crt).
+      - stepca_data:/step-root:ro
+    depends_on:
+      - app
+
+  worker:
+    build: .
+    image: filearr:local
+    restart: unless-stopped
+    # T8 throughput knobs (env-driven, defaults baked in):
+    #   FILEARR_WORKER_CONCURRENCY  parallel jobs per worker process (default 4)
+    #   FILEARR_WORKER_QUEUES       comma-separated queues to serve
+    #                               (empty/unset = all queues)
+    # The sh -c wrapper maps the FILEARR_* env onto procrastinate's worker flags
+    # (procrastinate reads its OWN PROCRASTINATE_WORKER_* envvars, so we translate
+    # to keep every tunable under the single FILEARR_ prefix). PYTHONPATH=/app is
+    # set in the image; do not drop it.
+    command:
+      - sh
+      - -c
+      - >-
+        exec procrastinate --app=filearr.worker.proc_app worker
+        --concurrency "${FILEARR_WORKER_CONCURRENCY:-4}"
+        --queues "${FILEARR_WORKER_QUEUES:-}"
+    env_file: .env
+    #
+    # Scale out extraction WITHOUT starving scan control -----------------------
+    # Option A (simplest): more general workers, each serving all queues:
+    #     docker compose up -d --scale worker=3
+    #   Extract jobs run at negative priority, so scan/cancel jobs still jump the
+    #   queue on any idle worker.
+    # Option B (isolation): pin a dedicated worker to the extract queue so a huge
+    #   backlog can never occupy the slots that scan-control needs. Add a service:
+    #
+    #     extract-worker:
+    #       <<: *worker            # (or copy this worker block)
+    #       command:
+    #         - sh
+    #         - -c
+    #         - >-
+    #           exec procrastinate --app=filearr.worker.proc_app worker
+    #           --concurrency "${FILEARR_EXTRACT_CONCURRENCY:-8}" --queues extract
+    #
+    #   and set the primary `worker` to FILEARR_WORKER_QUEUES=scan,index,maintenance.
+    #
+    # OPS-T7 / P12 handoff: Intel iGPU (Arc/UHD) render node for ffmpeg
+    # `-hwaccel qsv` video poster-frames. PURELY an accelerator opt-in — the
+    # thumbnail pipeline (FILEARR_THUMB_ACCEL=auto) probes /dev/dri/renderD128
+    # once and falls back to software with ZERO qsv attempts when the node is
+    # absent, so this block is safe to keep on CPU-only hosts (a missing device
+    # just... isn't there). `group_add` grants the non-root container user access
+    # to renderD128 (root:render). On some hosts the node's group is `video`
+    # instead — match the node's real group: `stat -c '%G' /dev/dri/renderD128`.
+    # LXC (Proxmox): the CT also needs the DRI cgroup allow + /dev/dri mount
+    # entry (see proxmox/deploy-proxmox.sh notes). FILEARR_THUMB_ACCEL=off is the
+    # kill-switch that disables the hardware path regardless of this mapping.
+    # iGPU (/dev/dri) mapping is added CONDITIONALLY by the deploy scripts
+    # override (only when the device exists in the CT) — a hardcoded devices:
+    # entry hard-fails docker on hosts without passthrough (live 2026-07-13).
+    volumes:
+      - ./config:/config
+      # long-form bind with rslave: if the FUSE/SMB mount under this path is
+      # remounted on the host, running containers see the NEW mount instead of
+      # a dead endpoint (fixes OSError: EIO after rclone restarts)
+      - type: bind
+        source: ${MEDIA_PATH:-/mnt/user/data/media}
+        target: /data/media
+        read_only: true
+        bind:
+          propagation: rslave
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+
+  watcher:
+    build: .
+    image: filearr:local
+    restart: unless-stopped
+    command: ["python", "-m", "filearr.watchd"]
+    env_file: .env
+    volumes:
+      - ./config:/config
+      # long-form bind with rslave: if the FUSE/SMB mount under this path is
+      # remounted on the host, running containers see the NEW mount instead of
+      # a dead endpoint (fixes OSError: EIO after rclone restarts)
+      - type: bind
+        source: ${MEDIA_PATH:-/mnt/user/data/media}
+        target: /data/media
+        read_only: true
+        bind:
+          propagation: rslave
+    depends_on:
+      postgres:
+        condition: service_healthy
+      meilisearch:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:18.4   # pin minor; 18.4 fixes 11 CVEs vs 18.0
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: filearr
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-filearr}
+      POSTGRES_DB: filearr
+    # PG18 async I/O: 'worker' io_method is the default — no custom command needed.
+    # (A wrong/unknown -c parameter makes postgres exit fatally at boot.)
+    volumes:
+      - pgdata:/var/lib/postgresql   # PG18+ image convention: mount the PARENT, not .../data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U filearr"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 30s
+
+  meilisearch:
+    image: getmeili/meilisearch:v1.49.0   # pin exact patch; >=1.48.2 for CVE-2026-57823/4; 1.49.0 verified live 2026-07-09
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILI_MASTER_KEY:-change-me}
+      MEILI_NO_ANALYTICS: "true"
+    volumes:
+      # P9-T11 (confirmed 2026-07-09): Meili's LMDB store lives on a LOCAL
+      # Docker named volume (default `local` driver -> the host Docker
+      # data-root, i.e. fast/local disk), NEVER on the ${MEDIA_PATH} SMB/rclone
+      # media bind used by app/worker/watcher. LMDB is latency-critical; keeping
+      # it off the network mount is load-bearing. Correct-by-default, no change.
+      - meilidata:/meili_data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:7700/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- P5-T1: step-ca (smallstep) — OPTIONAL distributed-agent CA ------------
+  # Runs ONLY under the `agents` compose profile (`docker compose --profile
+  # agents up`). A single-node deploy never starts it and is entirely
+  # unaffected — agents are a v3 opt-in (see docs/ops/agents.md). Apache-2.0,
+  # zero license friction. Pin is the version the phase-5 research names
+  # (v0.30.2, 2026-03-23); RE-VERIFY the exact patch + the FULL smallstep CVE
+  # list on any bump (same discipline as the Meili/Caddy pins). The image
+  # auto-inits a fresh CA on first boot from the DOCKER_STEPCA_INIT_* env (set
+  # these in .env); the generated root fingerprint (printed once in the
+  # container log, also `step certificate fingerprint`) is what FILEARR_CA_*
+  # pins for the register bootstrap response.
+  #
+  # P5-T2 (central half): the DOCKER_STEPCA_INIT_* env only creates a BARE JWK
+  # provisioner. Configure its cert claims to the spike's ruling — TLS cert
+  # duration min 24h / default 48h / max 72h, plus `allowRenewalAfterExpiry: true`
+  # as a BOUNDED grace for long-offline agents — and extract the provisioner
+  # private JWK into FILEARR_CA_PROVISIONER_JWK so central can mint the register
+  # `ca_ott`. Both steps + the SNI/L4-passthrough proxy warning (the CA must NOT
+  # be L7-terminated or cert-authenticated /renew silently breaks) are in
+  # docs/ops/agents.md §7. FILEARR_CA_PROVISIONER_JWK is a SECRET — put it in
+  # .env (the app/worker env_file), never in this committed file.
+  step-ca:
+    image: smallstep/step-ca:0.30.2
+    profiles: ["agents"]
+    restart: unless-stopped
+    ports:
+      - "9000:9000"
+    environment:
+      DOCKER_STEPCA_INIT_NAME: ${STEPCA_NAME:-Filearr Agents CA}
+      DOCKER_STEPCA_INIT_DNS_NAMES: ${STEPCA_DNS:-localhost,step-ca}
+      DOCKER_STEPCA_INIT_PROVISIONER_NAME: ${FILEARR_CA_PROVISIONER:-filearr-agents}
+      DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT: "true"
+    volumes:
+      - stepca_data:/home/step
+    healthcheck:
+      test: ["CMD", "step", "ca", "health", "--ca-url", "https://localhost:9000", "--root", "/home/step/certs/root_ca.crt"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+volumes:
+  pgdata:
+  # P9-T11: local `local`-driver named volume (host Docker data-root / NVMe),
+  # deliberately NOT bound to the SMB/rclone media mount.
+  meilidata:
+  caddy_data:    # OPS-T1: Caddy internal CA + issued certs (must persist)
+  caddy_config:  # OPS-T1: Caddy runtime state
+  stepca_data:   # P5-T1: step-ca root/intermediate + provisioner state (agents profile)

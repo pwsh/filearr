@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>filearr-worker</Name>
+  <Repository>ghcr.io/CHANGEME/filearr:latest</Repository>
+  <Registry>https://ghcr.io/CHANGEME/filearr</Registry>
+  <Network>filearr</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/CHANGEME/filearr/discussions</Support>
+  <Project>https://github.com/CHANGEME/filearr</Project>
+  <Overview>Background worker for filearr: library scans, metadata extraction, hashing, search-index sync, recycle-bin purge. Same image as the main app, different command (set via Post Arguments). Requires the same 'filearr' Docker network and identical DB/Meilisearch settings as the filearr container. Scale concurrency with --concurrency N in Post Arguments.</Overview>
+  <Category>MediaApp:Other Tools:Utilities</Category>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/CHANGEME/filearr/main/frontend/public/icon.png</Icon>
+  <ExtraParams>--restart=unless-stopped</ExtraParams>
+  <PostArgs>procrastinate --app=filearr.worker.proc_app worker --concurrency 4</PostArgs>
+  <Requires>filearr, filearr-postgres, filearr-meilisearch, docker network 'filearr'</Requires>
+  <Config Name="Config" Target="/config" Default="/mnt/user/appdata/filearr" Mode="rw" Description="MUST be the same path as the filearr container (shared thumbnails/caches)" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/filearr</Config>
+  <Config Name="Media" Target="/data/media" Default="/mnt/user/data/media" Mode="ro" Description="Media library root — must match the filearr container mapping exactly" Type="Path" Display="always" Required="true" Mask="false">/mnt/user/data/media</Config>
+  <Config Name="Database URL" Target="FILEARR_DATABASE_URL" Default="postgresql+psycopg://filearr:change-me-too@filearr-postgres:5432/filearr" Mode="" Description="Same value as the filearr container" Type="Variable" Display="always" Required="true" Mask="false">postgresql+psycopg://filearr:change-me-too@filearr-postgres:5432/filearr</Config>
+  <Config Name="Procrastinate DSN" Target="FILEARR_PROCRASTINATE_DSN" Default="postgresql://filearr:change-me-too@filearr-postgres:5432/filearr" Mode="" Description="Same value as the filearr container" Type="Variable" Display="always" Required="true" Mask="false">postgresql://filearr:change-me-too@filearr-postgres:5432/filearr</Config>
+  <Config Name="Meilisearch URL" Target="FILEARR_MEILI_URL" Default="http://filearr-meilisearch:7700" Mode="" Description="Same value as the filearr container" Type="Variable" Display="always" Required="true" Mask="false">http://filearr-meilisearch:7700</Config>
+  <Config Name="Meilisearch Master Key" Target="FILEARR_MEILI_MASTER_KEY" Default="" Mode="" Description="Same value as the filearr container" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="PUID" Target="PUID" Default="99" Mode="" Description="User ID" Type="Variable" Display="advanced" Required="false" Mask="false">99</Config>
+  <Config Name="PGID" Target="PGID" Default="100" Mode="" Description="Group ID" Type="Variable" Display="advanced" Required="false" Mask="false">100</Config>
+  <Config Name="TZ" Target="TZ" Default="Etc/UTC" Mode="" Description="Timezone (cron schedules for purge/reconcile jobs)" Type="Variable" Display="advanced" Required="false" Mask="false">Etc/UTC</Config>
+</Container>

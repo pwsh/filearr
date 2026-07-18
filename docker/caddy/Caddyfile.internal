@@ -1,0 +1,36 @@
+# Filearr — Caddy reverse proxy, INTERNAL-CA mode (FILEARR_TLS_MODE=internal).
+#
+# This is the original OPS-T1 behaviour: terminate HTTPS in front of the FastAPI
+# app (service `app`, port 8000) using Caddy's built-in *internal* CA — a
+# self-signed root minted and stored on the `caddy_data` volume. No ACME, no
+# public DNS, no internet egress required; designed for LAN / homelab access
+# (https://<host>:<published-tls-port>). The default when a deploy does not
+# opt into the acme-dns path (see Caddyfile.acme + proxmox/deploy-proxmox.sh).
+#
+# The plain-HTTP port the app publishes directly (WEB_PORT / 8484) stays alive
+# for API-only and backward-compat use.
+#
+# Trusting the LAN CA on client machines (one-time, removes the browser warning):
+#   docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt ./filearr-root-ca.crt
+# then import filearr-root-ca.crt into the OS/browser trust store.
+{
+	# We publish only the TLS port; Caddy must not try to bind :80 for HTTP->HTTPS
+	# redirects (that port isn't mapped and the app already owns plain HTTP).
+	auto_https disable_redirects
+}
+
+# Port-only site: matches any Host/SNI (hostname or bare IP) the LAN client uses.
+:443 {
+	# `internal` = Caddy's self-signed CA. `on_demand` mints a leaf certificate at
+	# handshake time for whatever ServerName is presented — including a bare IP SAN
+	# — so DHCP hosts reached by raw IP still get a name-matching cert once the root
+	# CA is trusted. LAN-internal issuer, so on-demand needs no `ask` guard.
+	tls internal {
+		on_demand
+	}
+
+	reverse_proxy app:8000
+
+	# Give the poster/thumbnail and large-response paths room; homelab-scale.
+	encode zstd gzip
+}

@@ -1,0 +1,1267 @@
+{
+  "version": 1,
+  "description": "Canonical, language-neutral test vectors for the Filearr local query DSL (Phase 7). Single source of truth per Architect ruling R6: the Python reference parser (backend/filearr/querydsl.py) and the Go port (agent/internal/localapi) must both satisfy every vector. The meta.<key>/cf.<name> dynamic-filter family (Phase 11 T2) extends this contract; the Go port grows with it. 'ast' is the expected Query.to_dict(); 'error' is the expected ParseError (code + position are the contract, reason is informational).",
+  "vectors": [
+    {
+      "name": "empty",
+      "input": "",
+      "ast": {
+        "terms": [],
+        "filters": [],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "single_term",
+      "input": "hello",
+      "ast": {
+        "terms": [
+          {
+            "value": "hello",
+            "negated": false,
+            "fuzzy": false
+          }
+        ],
+        "filters": [],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "two_terms",
+      "input": "hello world",
+      "ast": {
+        "terms": [
+          {
+            "value": "hello",
+            "negated": false,
+            "fuzzy": false
+          },
+          {
+            "value": "world",
+            "negated": false,
+            "fuzzy": false
+          }
+        ],
+        "filters": [],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "quoted_phrase",
+      "input": "\"hello world\"",
+      "ast": {
+        "terms": [
+          {
+            "value": "hello world",
+            "negated": false,
+            "fuzzy": false
+          }
+        ],
+        "filters": [],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "fuzzy_term",
+      "input": "~fuzzyterm",
+      "ast": {
+        "terms": [
+          {
+            "value": "fuzzyterm",
+            "negated": false,
+            "fuzzy": true
+          }
+        ],
+        "filters": [],
+        "fuzzy": true
+      }
+    },
+    {
+      "name": "negated_term",
+      "input": "-badword",
+      "ast": {
+        "terms": [
+          {
+            "value": "badword",
+            "negated": true,
+            "fuzzy": false
+          }
+        ],
+        "filters": [],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "bang_negated_term",
+      "input": "!nope",
+      "ast": {
+        "terms": [
+          {
+            "value": "nope",
+            "negated": true,
+            "fuzzy": false
+          }
+        ],
+        "filters": [],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "negated_fuzzy_term",
+      "input": "-~word",
+      "ast": {
+        "terms": [
+          {
+            "value": "word",
+            "negated": true,
+            "fuzzy": true
+          }
+        ],
+        "filters": [],
+        "fuzzy": true
+      }
+    },
+    {
+      "name": "kind_simple",
+      "input": "kind:video",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "kind",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "video"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "kind_uppercase_lowered",
+      "input": "kind:VIDEO",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "kind",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "video"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "kind_negated",
+      "input": "-kind:video",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "kind",
+            "negated": true,
+            "value": {
+              "type": "string",
+              "value": "video"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "kind_bang_negated",
+      "input": "!kind:audio",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "kind",
+            "negated": true,
+            "value": {
+              "type": "string",
+              "value": "audio"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "ext_single",
+      "input": "ext:pdf",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "ext",
+            "negated": false,
+            "value": {
+              "type": "list",
+              "values": [
+                "pdf"
+              ]
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "ext_list",
+      "input": "ext:pdf;doc;txt",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "ext",
+            "negated": false,
+            "value": {
+              "type": "list",
+              "values": [
+                "pdf",
+                "doc",
+                "txt"
+              ]
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "ext_dot_and_case",
+      "input": "ext:.PDF",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "ext",
+            "negated": false,
+            "value": {
+              "type": "list",
+              "values": [
+                "pdf"
+              ]
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "ext_negated_list",
+      "input": "-ext:tmp;log",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "ext",
+            "negated": true,
+            "value": {
+              "type": "list",
+              "values": [
+                "tmp",
+                "log"
+              ]
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "size_gt_g",
+      "input": "size:>1G",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "size",
+            "negated": false,
+            "value": {
+              "type": "size",
+              "op": ">",
+              "bytes": 1073741824
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "size_gte_m",
+      "input": "size:>=500M",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "size",
+            "negated": false,
+            "value": {
+              "type": "size",
+              "op": ">=",
+              "bytes": 524288000
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "size_lt_bytes",
+      "input": "size:<1024",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "size",
+            "negated": false,
+            "value": {
+              "type": "size",
+              "op": "<",
+              "bytes": 1024
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "size_range",
+      "input": "size:1M..10M",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "size",
+            "negated": false,
+            "value": {
+              "type": "size",
+              "op": "range",
+              "lo": 1048576,
+              "hi": 10485760
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "size_eq_explicit",
+      "input": "size:=1K",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "size",
+            "negated": false,
+            "value": {
+              "type": "size",
+              "op": "=",
+              "bytes": 1024
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "size_eq_implicit_t",
+      "input": "size:2T",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "size",
+            "negated": false,
+            "value": {
+              "type": "size",
+              "op": "=",
+              "bytes": 2199023255552
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "size_zero",
+      "input": "size:>=0",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "size",
+            "negated": false,
+            "value": {
+              "type": "size",
+              "op": ">=",
+              "bytes": 0
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "size_negated",
+      "input": "-size:>1G",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "size",
+            "negated": true,
+            "value": {
+              "type": "size",
+              "op": ">",
+              "bytes": 1073741824
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "modified_lt_dur",
+      "input": "modified:<7d",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "modified",
+            "negated": false,
+            "value": {
+              "type": "duration",
+              "op": "<",
+              "seconds": 604800
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "modified_gt_date",
+      "input": "modified:>2026-01-01",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "modified",
+            "negated": false,
+            "value": {
+              "type": "date",
+              "op": ">",
+              "iso": "2026-01-01"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "created_gte_min",
+      "input": "created:>=30m",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "created",
+            "negated": false,
+            "value": {
+              "type": "duration",
+              "op": ">=",
+              "seconds": 1800
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "modified_date_range",
+      "input": "modified:2026-01-01..2026-02-01",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "modified",
+            "negated": false,
+            "value": {
+              "type": "date",
+              "op": "range",
+              "lo": "2026-01-01",
+              "hi": "2026-02-01"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "modified_dur_range",
+      "input": "modified:7d..30d",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "modified",
+            "negated": false,
+            "value": {
+              "type": "duration",
+              "op": "range",
+              "lo": 604800,
+              "hi": 2592000
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "modified_lte_week",
+      "input": "modified:<=1w",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "modified",
+            "negated": false,
+            "value": {
+              "type": "duration",
+              "op": "<=",
+              "seconds": 604800
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "modified_eq_date",
+      "input": "modified:2025-12-31",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "modified",
+            "negated": false,
+            "value": {
+              "type": "date",
+              "op": "=",
+              "iso": "2025-12-31"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "modified_leap_date",
+      "input": "modified:>2024-02-29",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "modified",
+            "negated": false,
+            "value": {
+              "type": "date",
+              "op": ">",
+              "iso": "2024-02-29"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "created_seconds",
+      "input": "created:<90s",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "created",
+            "negated": false,
+            "value": {
+              "type": "duration",
+              "op": "<",
+              "seconds": 90
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "path_glob",
+      "input": "path:**/movies/*",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "path",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "**/movies/*"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "path_quoted_space",
+      "input": "path:\"my movies/*\"",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "path",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "my movies/*"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "tag_simple",
+      "input": "tag:favorite",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "tag",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "favorite"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "tag_negated",
+      "input": "-tag:archived",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "tag",
+            "negated": true,
+            "value": {
+              "type": "string",
+              "value": "archived"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "tag_quoted_space",
+      "input": "tag:\"has space\"",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "tag",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "has space"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "hash_mixed_case",
+      "input": "hash:AbCd12",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "hash",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "abcd12"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "hash_full",
+      "input": "hash:deadbeef",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "hash",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "deadbeef"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "combo",
+      "input": "kind:video size:>1G modified:<7d",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "kind",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "video"
+            }
+          },
+          {
+            "key": "size",
+            "negated": false,
+            "value": {
+              "type": "size",
+              "op": ">",
+              "bytes": 1073741824
+            }
+          },
+          {
+            "key": "modified",
+            "negated": false,
+            "value": {
+              "type": "duration",
+              "op": "<",
+              "seconds": 604800
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "combo_fuzzy_mix",
+      "input": "~report kind:document",
+      "ast": {
+        "terms": [
+          {
+            "value": "report",
+            "negated": false,
+            "fuzzy": true
+          }
+        ],
+        "filters": [
+          {
+            "key": "kind",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "document"
+            }
+          }
+        ],
+        "fuzzy": true
+      }
+    },
+    {
+      "name": "unknown_key_is_term",
+      "input": "foo:bar",
+      "ast": {
+        "terms": [
+          {
+            "value": "foo:bar",
+            "negated": false,
+            "fuzzy": false
+          }
+        ],
+        "filters": [],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "colon_leading_is_term",
+      "input": ":colon",
+      "ast": {
+        "terms": [
+          {
+            "value": ":colon",
+            "negated": false,
+            "fuzzy": false
+          }
+        ],
+        "filters": [],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "phrase_plus_filter",
+      "input": "\"exact phrase\" kind:audio",
+      "ast": {
+        "terms": [
+          {
+            "value": "exact phrase",
+            "negated": false,
+            "fuzzy": false
+          }
+        ],
+        "filters": [
+          {
+            "key": "kind",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "audio"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "three_terms",
+      "input": "a b c",
+      "ast": {
+        "terms": [
+          {
+            "value": "a",
+            "negated": false,
+            "fuzzy": false
+          },
+          {
+            "value": "b",
+            "negated": false,
+            "fuzzy": false
+          },
+          {
+            "value": "c",
+            "negated": false,
+            "fuzzy": false
+          }
+        ],
+        "filters": [],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "unterminated_quote",
+      "input": "\"unterminated",
+      "error": {
+        "position": 0,
+        "code": "unterminated_quote",
+        "reason": "unterminated quoted string"
+      }
+    },
+    {
+      "name": "size_empty",
+      "input": "size:",
+      "error": {
+        "position": 5,
+        "code": "empty_value",
+        "reason": "size: has an empty value"
+      }
+    },
+    {
+      "name": "ext_empty",
+      "input": "ext:",
+      "error": {
+        "position": 4,
+        "code": "empty_value",
+        "reason": "ext: has an empty value"
+      }
+    },
+    {
+      "name": "hash_empty",
+      "input": "hash:",
+      "error": {
+        "position": 5,
+        "code": "empty_value",
+        "reason": "hash: has an empty value"
+      }
+    },
+    {
+      "name": "modified_empty",
+      "input": "modified:",
+      "error": {
+        "position": 9,
+        "code": "empty_value",
+        "reason": "modified: has an empty value"
+      }
+    },
+    {
+      "name": "size_comparator_no_num",
+      "input": "size:>",
+      "error": {
+        "position": 5,
+        "code": "bad_size_value",
+        "reason": "expected a size"
+      }
+    },
+    {
+      "name": "size_bad_suffix",
+      "input": "size:1X",
+      "error": {
+        "position": 5,
+        "code": "bad_size_suffix",
+        "reason": "unknown size suffix 'X'"
+      }
+    },
+    {
+      "name": "size_bad_suffix_gb",
+      "input": "size:1GB",
+      "error": {
+        "position": 5,
+        "code": "bad_size_suffix",
+        "reason": "unknown size suffix 'B'"
+      }
+    },
+    {
+      "name": "size_not_number",
+      "input": "size:abc",
+      "error": {
+        "position": 5,
+        "code": "bad_size_suffix",
+        "reason": "unknown size suffix 'c'"
+      }
+    },
+    {
+      "name": "size_decimal_rejected",
+      "input": "size:1.5G",
+      "error": {
+        "position": 5,
+        "code": "bad_size_value",
+        "reason": "not an integer size: '1.5G'"
+      }
+    },
+    {
+      "name": "size_cmp_bad",
+      "input": "size:>=abc",
+      "error": {
+        "position": 5,
+        "code": "bad_size_suffix",
+        "reason": "unknown size suffix 'c'"
+      }
+    },
+    {
+      "name": "fuzzy_on_filter",
+      "input": "~kind:video",
+      "error": {
+        "position": 0,
+        "code": "fuzzy_on_filter",
+        "reason": "'~' fuzzy marker is only valid on free-text terms"
+      }
+    },
+    {
+      "name": "time_bad_unit",
+      "input": "modified:>7x",
+      "error": {
+        "position": 9,
+        "code": "bad_time_value",
+        "reason": "not a date or duration: '7x'"
+      }
+    },
+    {
+      "name": "time_bad_month",
+      "input": "modified:2026-13-01",
+      "error": {
+        "position": 9,
+        "code": "bad_date",
+        "reason": "not a valid calendar date: '2026-13-01'"
+      }
+    },
+    {
+      "name": "time_unpadded_date",
+      "input": "modified:2026-1-1",
+      "error": {
+        "position": 9,
+        "code": "bad_time_value",
+        "reason": "not a date or duration: '2026-1-1'"
+      }
+    },
+    {
+      "name": "hash_not_hex",
+      "input": "hash:xyz",
+      "error": {
+        "position": 5,
+        "code": "bad_hash",
+        "reason": "not a hex digest: 'xyz'"
+      }
+    },
+    {
+      "name": "size_range_trailing",
+      "input": "size:1M..",
+      "error": {
+        "position": 5,
+        "code": "bad_range",
+        "reason": "malformed size range: '1M..'"
+      }
+    },
+    {
+      "name": "size_range_leading",
+      "input": "size:..1M",
+      "error": {
+        "position": 5,
+        "code": "bad_range",
+        "reason": "malformed size range: '..1M'"
+      }
+    },
+    {
+      "name": "time_range_mixed",
+      "input": "modified:7d..2026-01-01",
+      "error": {
+        "position": 9,
+        "code": "bad_range",
+        "reason": "a range must not mix dates and durations"
+      }
+    },
+    {
+      "name": "size_range_with_cmp",
+      "input": "size:>1M..2M",
+      "error": {
+        "position": 5,
+        "code": "bad_range",
+        "reason": "a range may not carry a comparator"
+      }
+    },
+    {
+      "name": "ext_empty_item",
+      "input": "ext:pdf;;doc",
+      "error": {
+        "position": 4,
+        "code": "empty_value",
+        "reason": "empty item in list value"
+      }
+    },
+    {
+      "name": "meta_text_eq",
+      "input": "meta.resolution:1080p",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "meta.resolution",
+            "negated": false,
+            "value": {
+              "type": "meta",
+              "op": "=",
+              "value": "1080p"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "meta_numeric_gt",
+      "input": "meta.bitrate:>1000000",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "meta.bitrate",
+            "negated": false,
+            "value": {
+              "type": "meta",
+              "op": ">",
+              "value": "1000000"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "meta_numeric_gte",
+      "input": "meta.width:>=1920",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "meta.width",
+            "negated": false,
+            "value": {
+              "type": "meta",
+              "op": ">=",
+              "value": "1920"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "meta_range",
+      "input": "meta.height:480..720",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "meta.height",
+            "negated": false,
+            "value": {
+              "type": "meta",
+              "op": "range",
+              "lo": "480",
+              "hi": "720"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "meta_nested_key",
+      "input": "meta.audio.channels:2",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "meta.audio.channels",
+            "negated": false,
+            "value": {
+              "type": "meta",
+              "op": "=",
+              "value": "2"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "cf_text_eq",
+      "input": "cf.rating:5",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "cf.rating",
+            "negated": false,
+            "value": {
+              "type": "meta",
+              "op": "=",
+              "value": "5"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "cf_le",
+      "input": "cf.stars:<=3",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "cf.stars",
+            "negated": false,
+            "value": {
+              "type": "meta",
+              "op": "<=",
+              "value": "3"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "cf_negated",
+      "input": "-cf.status:archived",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "cf.status",
+            "negated": true,
+            "value": {
+              "type": "meta",
+              "op": "=",
+              "value": "archived"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "meta_bad_key_uppercase",
+      "input": "meta.Resolution:x",
+      "error": {
+        "position": 0,
+        "code": "bad_meta_key",
+        "reason": "subkey out of allow-listed charset"
+      }
+    },
+    {
+      "name": "cf_bad_key_char",
+      "input": "cf.ra-ting:x",
+      "error": {
+        "position": 0,
+        "code": "bad_cf_key",
+        "reason": "subkey out of allow-listed charset"
+      }
+    },
+    {
+      "name": "meta_empty_subkey",
+      "input": "meta.:1",
+      "error": {
+        "position": 0,
+        "code": "bad_meta_key",
+        "reason": "empty subkey"
+      }
+    },
+    {
+      "name": "meta_fuzzy_on_filter",
+      "input": "~meta.x:1",
+      "error": {
+        "position": 0,
+        "code": "fuzzy_on_filter",
+        "reason": "'~' fuzzy marker is only valid on free-text terms"
+      }
+    },
+    {
+      "name": "meta_comparator_no_value",
+      "input": "meta.x:>",
+      "error": {
+        "position": 7,
+        "code": "empty_value",
+        "reason": "comparator with no value"
+      }
+    },
+    {
+      "name": "meta_range_with_cmp",
+      "input": "meta.x:>1..2",
+      "error": {
+        "position": 7,
+        "code": "bad_range",
+        "reason": "a range may not carry a comparator"
+      }
+    }
+  ]
+}

@@ -1,0 +1,421 @@
+{
+  "version": 1,
+  "description": "UI-T11 language-neutral vectors for the friendly scan-schedule builder (frontend/src/lib/schedule.ts). Each vector: a LOCAL builder choice + an offset_minutes (JS getTimezoneOffset(), +west), the expected UTC cron the builder must generate, and UTC due-time samples. The Python port + cron_is_due/cronsim pin the semantic contract the JS must satisfy. Round-trip: generateCron(parseCron(cron)) == cron.",
+  "dow_convention": "0=Sunday .. 6=Saturday (cron 7 also Sunday)",
+  "vectors": [
+    {
+      "name": "off_null",
+      "offset_minutes": 0,
+      "builder": {
+        "mode": "off"
+      },
+      "cron": null,
+      "due": []
+    },
+    {
+      "name": "hourly_utc_30",
+      "offset_minutes": 0,
+      "builder": {
+        "mode": "hourly",
+        "minute": 30
+      },
+      "cron": "30 * * * *",
+      "due": [
+        {
+          "utc": "2026-07-07T10:30:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-07T10:31:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "hourly_west_min0",
+      "offset_minutes": 300,
+      "builder": {
+        "mode": "hourly",
+        "minute": 0
+      },
+      "cron": "0 * * * *",
+      "due": [
+        {
+          "utc": "2026-07-07T10:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-07T10:01:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "hourly_fractional_ist",
+      "offset_minutes": -330,
+      "builder": {
+        "mode": "hourly",
+        "minute": 0
+      },
+      "cron": "30 * * * *",
+      "due": [
+        {
+          "utc": "2026-07-07T10:30:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-07T10:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "daily_utc_1400",
+      "offset_minutes": 0,
+      "builder": {
+        "mode": "daily",
+        "hour": 14,
+        "minute": 0
+      },
+      "cron": "0 14 * * *",
+      "due": [
+        {
+          "utc": "2026-07-07T14:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-07T14:01:00",
+          "due": false
+        },
+        {
+          "utc": "2026-07-07T13:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "daily_west_sameday",
+      "offset_minutes": 300,
+      "builder": {
+        "mode": "daily",
+        "hour": 2,
+        "minute": 0
+      },
+      "cron": "0 7 * * *",
+      "due": [
+        {
+          "utc": "2026-07-07T07:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-07T02:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "daily_west_crossfwd",
+      "offset_minutes": 300,
+      "builder": {
+        "mode": "daily",
+        "hour": 23,
+        "minute": 0
+      },
+      "cron": "0 4 * * *",
+      "due": [
+        {
+          "utc": "2026-07-07T04:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-07T23:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "daily_east_crossback",
+      "offset_minutes": -540,
+      "builder": {
+        "mode": "daily",
+        "hour": 1,
+        "minute": 0
+      },
+      "cron": "0 16 * * *",
+      "due": [
+        {
+          "utc": "2026-07-07T16:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-07T01:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "weekly_utc_mon",
+      "offset_minutes": 0,
+      "builder": {
+        "mode": "weekly",
+        "hour": 9,
+        "minute": 0,
+        "daysOfWeek": [
+          1
+        ]
+      },
+      "cron": "0 9 * * 1",
+      "due": [
+        {
+          "utc": "2026-07-06T09:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-07T09:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "weekly_west_sun_to_mon",
+      "offset_minutes": 300,
+      "builder": {
+        "mode": "weekly",
+        "hour": 22,
+        "minute": 0,
+        "daysOfWeek": [
+          0
+        ]
+      },
+      "cron": "0 3 * * 1",
+      "due": [
+        {
+          "utc": "2026-07-06T03:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-05T03:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "weekly_east_mon_to_sun",
+      "offset_minutes": -540,
+      "builder": {
+        "mode": "weekly",
+        "hour": 6,
+        "minute": 0,
+        "daysOfWeek": [
+          1
+        ]
+      },
+      "cron": "0 21 * * 0",
+      "due": [
+        {
+          "utc": "2026-07-05T21:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-06T21:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "weekly_multi_west_shift",
+      "offset_minutes": 300,
+      "builder": {
+        "mode": "weekly",
+        "hour": 23,
+        "minute": 30,
+        "daysOfWeek": [
+          1,
+          3,
+          5
+        ]
+      },
+      "cron": "30 4 * * 2,4,6",
+      "due": [
+        {
+          "utc": "2026-07-07T04:30:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-09T04:30:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-06T04:30:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "weekly_east_sat_to_fri",
+      "offset_minutes": -540,
+      "builder": {
+        "mode": "weekly",
+        "hour": 2,
+        "minute": 0,
+        "daysOfWeek": [
+          6
+        ]
+      },
+      "cron": "0 17 * * 5",
+      "due": [
+        {
+          "utc": "2026-07-10T17:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-11T17:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "monthly_utc_15",
+      "offset_minutes": 0,
+      "builder": {
+        "mode": "monthly",
+        "hour": 3,
+        "minute": 0,
+        "dayOfMonth": 15
+      },
+      "cron": "0 3 15 * *",
+      "due": [
+        {
+          "utc": "2026-07-15T03:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-16T03:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "monthly_west_dom_fwd",
+      "offset_minutes": 300,
+      "builder": {
+        "mode": "monthly",
+        "hour": 23,
+        "minute": 0,
+        "dayOfMonth": 15
+      },
+      "cron": "0 4 16 * *",
+      "due": [
+        {
+          "utc": "2026-07-16T04:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-15T04:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "monthly_east_dom_back",
+      "offset_minutes": -540,
+      "builder": {
+        "mode": "monthly",
+        "hour": 1,
+        "minute": 0,
+        "dayOfMonth": 15
+      },
+      "cron": "0 16 14 * *",
+      "due": [
+        {
+          "utc": "2026-07-14T16:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-15T16:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "monthly_east_day1_wrap",
+      "offset_minutes": -540,
+      "builder": {
+        "mode": "monthly",
+        "hour": 1,
+        "minute": 0,
+        "dayOfMonth": 1
+      },
+      "cron": "0 16 31 * *",
+      "due": [
+        {
+          "utc": "2026-07-31T16:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-30T16:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "monthly_west_day31_wrap",
+      "offset_minutes": 300,
+      "builder": {
+        "mode": "monthly",
+        "hour": 23,
+        "minute": 0,
+        "dayOfMonth": 31
+      },
+      "cron": "0 4 1 * *",
+      "due": [
+        {
+          "utc": "2026-08-01T04:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-31T04:00:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "advanced_step",
+      "offset_minutes": 0,
+      "builder": {
+        "mode": "advanced",
+        "cron": "*/15 * * * *"
+      },
+      "cron": "*/15 * * * *",
+      "due": [
+        {
+          "utc": "2026-07-07T10:15:00",
+          "due": true
+        },
+        {
+          "utc": "2026-07-07T10:16:00",
+          "due": false
+        }
+      ]
+    },
+    {
+      "name": "advanced_month_set",
+      "offset_minutes": 0,
+      "builder": {
+        "mode": "advanced",
+        "cron": "0 0 1 1 *"
+      },
+      "cron": "0 0 1 1 *",
+      "due": [
+        {
+          "utc": "2026-01-01T00:00:00",
+          "due": true
+        },
+        {
+          "utc": "2026-01-02T00:00:00",
+          "due": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<Container version="2">
+  <Name>filearr-postgres</Name>
+  <Repository>postgres:18.4</Repository>
+  <Registry>https://hub.docker.com/_/postgres</Registry>
+  <Network>filearr</Network>
+  <Shell>bash</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/CHANGEME/filearr/discussions</Support>
+  <Project>https://www.postgresql.org/</Project>
+  <Overview>PostgreSQL 18 for filearr — source of truth for the catalog AND the job queue (Procrastinate). Pinned to 18.4 (fixes 11 CVEs vs 18.0). Uses PG18's native uuidv7() and async I/O (io_method=worker, set via Post Arguments).&#13;&#10;&#13;&#10;Install this container FIRST. Requires the user-defined Docker network 'filearr':  docker network create filearr&#13;&#10;&#13;&#10;Back up with pg_dump; the Meilisearch index is disposable but this database is not.</Overview>
+  <Category>Other:</Category>
+  <TemplateURL/>
+  <Icon>https://raw.githubusercontent.com/docker-library/docs/master/postgres/logo.png</Icon>
+  <ExtraParams>--restart=unless-stopped --health-cmd="pg_isready -U filearr" --health-interval=10s</ExtraParams>
+  <PostArgs>postgres -c io_method=worker</PostArgs>
+  <Requires>docker network 'filearr'</Requires>
+  <Config Name="Data" Target="/var/lib/postgresql" Default="/mnt/user/appdata/filearr-postgres" Mode="rw" Description="Database files. Keep on cache/appdata (fast pool), NOT on the array." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/filearr-postgres</Config>
+  <Config Name="POSTGRES_USER" Target="POSTGRES_USER" Default="filearr" Mode="" Description="Database user" Type="Variable" Display="always" Required="true" Mask="false">filearr</Config>
+  <Config Name="POSTGRES_PASSWORD" Target="POSTGRES_PASSWORD" Default="" Mode="" Description="Database password — must match the DSNs in filearr and filearr-worker" Type="Variable" Display="always" Required="true" Mask="true"/>
+  <Config Name="POSTGRES_DB" Target="POSTGRES_DB" Default="filearr" Mode="" Description="Database name" Type="Variable" Display="always" Required="true" Mask="false">filearr</Config>
+  <Config Name="Port (optional)" Target="5432" Default="" Mode="tcp" Description="Only map if you need external DB access (psql/pgAdmin from LAN). Leave empty otherwise." Type="Port" Display="advanced" Required="false" Mask="false"/>
+</Container>
