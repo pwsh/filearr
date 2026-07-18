@@ -1948,6 +1948,8 @@ export interface AgentOut {
   policy_version_applied: number | null;
   revoked_at: string | null;
   created_at: string;
+  // W6-D4: current config-group assignment (null = built-in defaults).
+  config_group_id: string | null;
 }
 
 export const listAgents = () => request<AgentOut[]>("/agents");
@@ -2102,3 +2104,154 @@ export async function deleteAgentShareMap(id: string): Promise<void> {
   });
   if (!res.ok && res.status !== 204) throw new ApiError(res.status, await res.text());
 }
+
+// --------------------------------------------------------------------------- //
+// W6-D4 — agent management page: fleet summary tallies, config-group CRUD +     //
+// assignment, and console installer distribution. Types mirror the W6-D2 frozen //
+// backend shapes (filearr.agent_config.GroupSettings + the installer contract). //
+// --------------------------------------------------------------------------- //
+
+/** GET /agents/summary — status-header counts (read scope). connected +
+ *  disconnected = active (cert-bound) agents split by liveness; pending/revoked
+ *  are lifecycle buckets; total is the sum of all four. */
+export interface AgentFleetSummary {
+  total: number;
+  connected: number;
+  disconnected: number;
+  pending: number;
+  revoked: number;
+}
+
+export const getAgentSummary = () =>
+  request<AgentFleetSummary>("/agents/summary");
+
+/** The named folder-selection presets a config group's scan_selections may use
+ *  (mirrors filearr.agent_config.SCAN_PRESET_NAMES). "custom" is the empty,
+ *  admin-defined scaffold. */
+export const SCAN_PRESET_NAMES = [
+  "user-documents",
+  "user-media",
+  "user-profiles-full",
+  "downloads",
+  "server-data",
+  "custom",
+] as const;
+export type ScanPresetName = (typeof SCAN_PRESET_NAMES)[number];
+
+/** Config-group log levels (mirrors filearr.agent_config.LOG_LEVELS). */
+export const AGENT_LOG_LEVELS = ["error", "warn", "info", "verbose", "debug"] as const;
+export type AgentLogLevel = (typeof AGENT_LOG_LEVELS)[number];
+
+/** One path selection an agent walks. Either a preset OR explicit path specs
+ *  (or both); include/exclude regexes refine matches; enabled gates it. */
+export interface ScanSelection {
+  preset?: string | null;
+  paths?: string[];
+  include_regex?: string[];
+  exclude_regex?: string[];
+  enabled?: boolean;
+}
+
+export interface InventoryConfig {
+  enabled?: boolean;
+  collectors?: string[];
+}
+
+/** The typed config-group settings object (v1). Unknown top-level keys are
+ *  REJECTED by the backend (422) — keep this in lockstep with GroupSettings. */
+export interface GroupSettings {
+  log_level?: AgentLogLevel | null;
+  scan_selections?: ScanSelection[] | null;
+  inventory?: InventoryConfig | null;
+  scan_schedule_cron?: string | null;
+}
+
+export interface ConfigGroupOut {
+  id: string;
+  name: string;
+  description: string | null;
+  settings: GroupSettings;
+  member_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConfigGroupIn {
+  name: string;
+  description?: string | null;
+  settings?: GroupSettings;
+}
+
+export interface ConfigGroupUpdateIn {
+  name?: string;
+  description?: string | null;
+  settings?: GroupSettings;
+}
+
+export const listConfigGroups = () =>
+  request<ConfigGroupOut[]>("/agents/config-groups");
+
+export const createConfigGroup = (body: ConfigGroupIn) =>
+  request<ConfigGroupOut>("/agents/config-groups", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const updateConfigGroup = (id: string, patch: ConfigGroupUpdateIn) =>
+  request<ConfigGroupOut>(`/agents/config-groups/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+
+export async function deleteConfigGroup(id: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/agents/config-groups/${id}`, {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: { ...(KEY() ? { Authorization: `Bearer ${KEY()}` } : {}) },
+  });
+  if (!res.ok && res.status !== 204) throw new ApiError(res.status, await res.text());
+}
+
+/** PUT /agents/{id}/config-group — assign (or clear with null). Returns the
+ *  newly-assigned group, or null when cleared. */
+export const assignConfigGroup = (agentId: string, groupId: string | null) =>
+  request<ConfigGroupOut | null>(`/agents/${agentId}/config-group`, {
+    method: "PUT",
+    body: JSON.stringify({ config_group_id: groupId }),
+  });
+
+// ---- console installer distribution (POST /agents/installer-config) ----------
+export interface InstallerConfigIn {
+  central_url_override?: string | null;
+  agent_name?: string | null;
+  config_group_id?: string | null;
+  log_level?: string | null;
+  ttl_seconds?: number | null;
+}
+
+export interface InstallerSidecar {
+  central_url: string;
+  enrollment_token: string; // raw, show-once
+  agent_name: string | null;
+  config_group: string | null; // group NAME
+  log_level: string | null;
+}
+
+export interface InstallHint {
+  windows: string;
+  linux: string;
+  macos: string;
+}
+
+export interface InstallerConfigOut {
+  sidecar: InstallerSidecar;
+  token_hash: string;
+  expires_at: string;
+  install_hint: InstallHint;
+}
+
+export const issueInstallerConfig = (body: InstallerConfigIn) =>
+  request<InstallerConfigOut>("/agents/installer-config", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });

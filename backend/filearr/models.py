@@ -1352,11 +1352,67 @@ class Agent(Base):
     agent_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     # FK-adjacent to phase-2 policy_versions (shape coordinated, not yet a FK).
     policy_version_applied: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # W6-D2: the agent's assigned configuration group (remote configuration). NULL
+    # = built-in agent defaults (a "default" group is NOT special-cased — NULL IS
+    # the default). ON DELETE SET NULL: deleting a group falls its members back to
+    # defaults. Distinct from ``rollout_group`` (the P5-T7 release-canary group);
+    # this is the config-push grouping dimension only.
+    config_group_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_config_groups.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # W6-D3: the additive capability advertisement the agent attaches to every
+    # command poll (``{inventory_collectors: [...], inventory_version: N}``). NULL
+    # until the agent first polls with a capabilities body; stored VERBATIM. The UI
+    # reads it to offer only the collectors an agent actually supports — so a new
+    # inventory COMPOSITION never needs an agent redeploy, only a capable agent.
+    capabilities: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class AgentConfigGroup(Base):
+    """A named, reusable remote-configuration bundle assigned to fleet agents
+    (W6-D2). An operator authors the ``settings`` once and assigns the group to
+    many agents; the settings ride the EXISTING policy channel
+    (``GET /agents/{id}/policy``) under a new top-level ``group`` section.
+
+    ``settings`` is a typed, versioned JSON object (see
+    :mod:`filearr.agent_config`): ``log_level``, ``scan_selections`` (per-OS path
+    selections — preset name + path specs with env/glob tokens + include/exclude
+    regexes), ``inventory`` (collector toggles), ``scan_schedule_cron``. It is
+    Pydantic-validated at the API (unknown top-level keys → 422) and stored
+    VERBATIM here.
+
+    This grouping is ORTHOGONAL to ``agents.rollout_group`` — that is the P5-T7
+    release-canary group and is deliberately NOT reused. ``agents.config_group_id``
+    references this table ON DELETE SET NULL: a deleted group falls its members
+    back to built-in defaults (NULL). NULL config_group_id means "built-in
+    defaults"; there is no special-cased "default" group row."""
+
+    __tablename__ = "agent_config_groups"
+    __table_args__ = (
+        UniqueConstraint("name", name="uq_agent_config_groups_name"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
+    )
+    name: Mapped[str] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    settings: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=text("now()"),
+        onupdate=func.now(),
     )
 
 
@@ -1590,7 +1646,7 @@ class AgentCommand(Base):
     __tablename__ = "agent_commands"
     __table_args__ = (
         CheckConstraint(
-            "kind IN ('stat_check','rehash_check','stage_upload')",
+            "kind IN ('stat_check','rehash_check','stage_upload','inventory')",
             name="agent_commands_kind_valid",
         ),
         CheckConstraint(

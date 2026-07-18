@@ -396,21 +396,30 @@ async def register_agent(
     platform: str,
     name: str | None = None,
     agent_version: str | None = None,
-) -> tuple[Any, str]:
+    config_group: str | None = None,
+) -> tuple[Any, str, str | None]:
     """P5-T1: consume an enrollment token and assign the authoritative,
     server-side ``agents.id`` (brief §7.1, R3 — registration PRECEDES CSR/cert;
     the agent embeds the returned id in its CSR CN/SAN, then the CA signs).
 
-    Returns ``(Agent row, raw_enroll_secret)``. The agent is created **pending**
-    (``cert_fingerprint`` NULL) — the fingerprint is bound later by
-    :func:`bind_agent_certificate` once the CA has signed. Raises
+    Returns ``(Agent row, raw_enroll_secret, config_group_warning)``. The agent is
+    created **pending** (``cert_fingerprint`` NULL) — the fingerprint is bound
+    later by :func:`bind_agent_certificate` once the CA has signed. Raises
     :class:`EnrollmentError` on an unknown / consumed / expired token or a bad
     platform. Single-use is enforced by stamping ``consumed_at``/``consumed_by``
     in the SAME transaction that creates the agent, so a replay finds the token
-    already consumed."""
+    already consumed.
+
+    W6-D2: ``config_group`` (an installer-sidecar string) is resolved by NAME to
+    ``agents.config_group_id`` at registration. FAIL-SAFE: an UNKNOWN name never
+    blocks enrollment — the agent registers with a NULL group and the returned
+    ``config_group_warning`` explains it (surfaced to the operator in the register
+    response). ``None``/absent → no group, no warning."""
     from datetime import UTC, datetime
 
-    from filearr.models import Agent, EnrollmentToken
+    from sqlalchemy import select
+
+    from filearr.models import Agent, AgentConfigGroup, EnrollmentToken
 
     if platform not in PLATFORMS:
         raise EnrollmentError("bad_platform", f"platform must be one of {sorted(PLATFORMS)}")
@@ -425,6 +434,20 @@ async def register_agent(
     if verdict is not None:
         raise EnrollmentError(verdict, f"enrollment token {verdict}")
 
+    # Resolve the config group by name (fail-safe: unknown name -> NULL + warning).
+    config_group_id = None
+    warning: str | None = None
+    if config_group:
+        grp = (
+            await session.execute(
+                select(AgentConfigGroup).where(AgentConfigGroup.name == config_group)
+            )
+        ).scalar_one_or_none()
+        if grp is not None:
+            config_group_id = grp.id
+        else:
+            warning = f"unknown config group {config_group!r}; assigned built-in defaults"
+
     raw_secret, secret_hash = generate_enroll_secret()
     agent = Agent(
         name=(name or hostname),
@@ -433,6 +456,7 @@ async def register_agent(
         rollout_group=row.rollout_group,
         agent_version=agent_version,
         enroll_secret_hash=secret_hash,
+        config_group_id=config_group_id,
     )
     session.add(agent)
     await session.flush()  # assigns agent.id (server-side, R3)
@@ -440,7 +464,7 @@ async def register_agent(
     row.consumed_at = datetime.now(UTC)
     row.consumed_by = agent.id
     await session.flush()
-    return agent, raw_secret
+    return agent, raw_secret, warning
 
 
 async def bind_agent_certificate(

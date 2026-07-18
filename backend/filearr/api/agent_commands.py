@@ -50,7 +50,7 @@ from filearr.worker import defer_index_sync
 
 router = APIRouter()
 
-CommandKind = Literal["stat_check", "rehash_check", "stage_upload"]
+CommandKind = Literal["stat_check", "rehash_check", "stage_upload", "inventory"]
 
 
 # --------------------------------------------------------------------------- #
@@ -105,6 +105,11 @@ class PollIn(BaseModel):
     # NOTE (P5-T4): this is a PLAIN poll — no server-side long-poll / hold-open
     # yet. The held-open long-poll rides P5-T4's poll/ETag machinery.
     max: int = Field(default=10, ge=1)
+    # W6-D3: the additive capability advertisement (inventory collector vocabulary +
+    # version). Absent (None) on an older agent build → the stored value is left
+    # unchanged. Stored VERBATIM on the agent row (size-capped) so the UI can offer
+    # only the collectors an agent supports.
+    capabilities: dict[str, Any] | None = None
 
 
 class CompleteIn(BaseModel):
@@ -395,6 +400,15 @@ async def poll_commands(
     settings = get_settings()
     want = min(body.max, settings.agent_command_poll_max)
     now = datetime.now(UTC)
+    # W6-D3: persist the agent's advertised capabilities (additive; a poll without
+    # them leaves the stored value untouched). Size-capped so a hostile/buggy body
+    # cannot bloat the row; an oversize advertisement is dropped (never a poll
+    # failure — the command drain must not depend on the advertisement).
+    if (
+        body.capabilities is not None
+        and _json_len(body.capabilities) <= settings.agent_capabilities_max_bytes
+    ):
+        agent.capabilities = body.capabilities
     rows = (
         await session.execute(
             select(AgentCommand)

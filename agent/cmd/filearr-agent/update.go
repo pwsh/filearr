@@ -20,7 +20,7 @@ const envUpdatePollInterval = "FILEARR_AGENT_UPDATE_POLL_INTERVAL" // Go duratio
 // mTLS-aware HTTP client. The pinned release-signing public key is baked in at
 // build time (update.PublicKeyBase64 via -ldflags); an unpinned build refuses
 // every update (fail-closed), logged once at startup.
-func newUpdater(certStore *enroll.CertStore, dataDir, centralURL, agentID string, httpClient *http.Client) *update.Updater {
+func newUpdater(certStore *enroll.CertStore, dataDir, centralURL, agentID string, httpClient *http.Client, serviceManaged bool) *update.Updater {
 	log := newLogger()
 	pub, err := update.PinnedKey()
 	if err != nil {
@@ -36,6 +36,11 @@ func newUpdater(certStore *enroll.CertStore, dataDir, centralURL, agentID string
 		PublicKey:      pub,
 		Interval:       envDuration(envUpdatePollInterval, 6*time.Hour),
 		Logger:         log,
+		// Under a service manager, prefer a clean restart-exit after an A/B swap
+		// over self-re-exec: the manager owns process lifecycle and would race a
+		// re-exec (and could end up running two instances). Interactive `run` keeps
+		// the historic self-re-exec path.
+		ServiceManaged: serviceManaged,
 	})
 }
 
@@ -45,8 +50,8 @@ func newUpdater(certStore *enroll.CertStore, dataDir, centralURL, agentID string
 // (if a swapped-in update is on trial this boot) and the long-interval poll loop.
 // It returns a done-channel so the daemon waits for a clean stop, mirroring
 // startCommandPoller / startReplication.
-func startUpdater(ctx context.Context, dataDir string, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client) <-chan struct{} {
-	upd := newUpdater(certStore, dataDir, centralURL, agentID, httpClient)
+func startUpdater(ctx context.Context, dataDir string, certStore *enroll.CertStore, centralURL, agentID string, httpClient *http.Client, serviceManaged bool) <-chan struct{} {
+	upd := newUpdater(certStore, dataDir, centralURL, agentID, httpClient, serviceManaged)
 	log := newLogger()
 
 	// Boot check before any loop: on an exhausted trial this restores + re-execs
@@ -103,7 +108,9 @@ func runUpdate(args []string) error {
 	ctx, cancel := signalContext()
 	defer cancel()
 
-	upd := newUpdater(certStore, cfg.DataDir, centralURL, st.AgentID, httpClient)
+	// The one-shot `update` command always runs interactively (an operator typed
+	// it), so it uses the self-re-exec path regardless of any service.
+	upd := newUpdater(certStore, cfg.DataDir, centralURL, st.AgentID, httpClient, false)
 	m, a, ok, err := upd.CheckForUpdate(ctx)
 	if err != nil {
 		return err

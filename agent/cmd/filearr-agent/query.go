@@ -169,9 +169,11 @@ func writerOr(w io.Writer, fallback io.Writer) io.Writer {
 	return w
 }
 
-func firstNonEmpty(a, b string) string {
-	if a != "" {
-		return a
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
 	}
-	return b
+	return ""
 }

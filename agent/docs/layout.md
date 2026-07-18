@@ -22,6 +22,9 @@ agent/
     update/                   # signed-manifest self-update + rollback
     localapi/                 # local CLI/UI query surface over the local index
     history/                  # local-only query frecency (P7-T6), a SEPARATE db
+    sidecar/                  # user-editable filearr-agent.json (W6-D1)
+    agentlog/                 # slog level+file logging (verbose level, rotation)
+    install/                  # per-OS install layout + service (kardianos) lifecycle
 ```
 
 ## Packages
@@ -126,3 +129,46 @@ write path, so there is no daemon timer. Key types: `Store`, `Entry`.
 > dir alongside `index.db`; deleting the data dir (or that file) erases all local
 > search history. Search history is never sent to central, so central holds no
 > copy to restore — this is intentional (research §6).
+
+### `internal/sidecar` (W6-D1)
+
+The user-editable `filearr-agent.json` config, the lowest-precedence source in
+the chain **explicit CLI flag > `FILEARR_AGENT_*` env > sidecar > built-in
+default**. Discovery order: `--config`, then beside the executable, then the OS
+config dir (`%ProgramData%\Filearr Agent\`, `/etc/filearr-agent/`,
+`/Library/Application Support/FilearrAgent/`). Parsing is strict JSON but
+tolerant of unknown keys (forward-compat); a rewrite preserves the full raw key
+set. `enrollment_token` is **one-shot**: `ConsumeToken` erases the spent token
+after a successful enroll, stamps `enrollment_token_consumed_at`, and rewrites
+0600 (the token is never stored at rest). Key types: `Config`, `Resolver`.
+
+### `internal/agentlog` (W6-D1)
+
+Builds the process `*slog.Logger` with a user-selectable level and optional
+rotating file sink. Five level names map onto slog: `error/warn/info/debug` plus
+a custom `verbose` = `slog.Level(-2)`, deliberately BETWEEN info (0) and debug
+(-4) — a handler at info hides verbose, a handler at verbose shows verbose but
+hides debug. `log_dir` (always set under a service install) enables a lumberjack
+sink at `<log_dir>/filearr-agent.log` (10 MiB ×5, gzip) plus stderr on a tty. Key
+symbols: `LevelVerbose`, `ParseLevel`, `New`, `Verbose`.
+
+### `internal/install` (W6-D1)
+
+Per-OS install layout resolution + the idempotent install/uninstall/service
+lifecycle, wrapping `kardianos/service` (v1.2.4). `ResolveLayout(goos, getenv)`
+is pure (target-OS separators, so it cross-resolves in tests); `Installer` runs
+the install/uninstall decisions against injected `FS` + `Controller` interfaces
+(the real ones back onto the OS filesystem + kardianos; tests mock both — no
+service is registered in a unit test). `ServiceConfig` builds the kardianos
+definition: `<bin> run --data … --log-dir … [--config …]`, an env marker
+`FILEARR_AGENT_SERVICE=1`, and per-OS auto-restart options. Key types: `Layout`,
+`Installer`, `Controller`, `Status`. See `install.md`.
+
+> **`run` is service-wrapped.** `filearr-agent run` now always executes under
+> `kardianos service.Run()` so one code path serves an interactive terminal, a
+> systemd/launchd unit, AND the Windows SCM (which kills a bare console loop that
+> does not answer the service control dispatcher). The daemon body is unchanged;
+> only its lifecycle owner is. Under a service manager the self-updater
+> (`internal/update`, `ServiceManaged`) exits with `ServiceRestartExitCode` after
+> an A/B swap instead of self-re-execing, letting the manager restart the new
+> binary (a re-exec would race the manager and risk two instances).

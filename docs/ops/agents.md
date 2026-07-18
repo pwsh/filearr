@@ -416,6 +416,245 @@ launchd `KeepAlive`) so a crashed agent is relaunched to trigger the rollback.
 A `sha256` mismatch on download, an invalid signature, or an unpinned build all
 **refuse the update** (fail-closed) rather than swapping.
 
+## 9. Configuration groups + remote configuration (W6-D2)
+
+A **config group** is a named, reusable bundle of remote-configuration settings
+you author once and assign to many agents. It is a NEW grouping dimension,
+ORTHOGONAL to `rollout_group` (§8 — that is the release-canary group only; the
+two are never conflated). `agents.config_group_id` is `NULL` by default, meaning
+"built-in agent defaults" — there is no special-cased "default" group row.
+
+Admin surface (all `admin` scope, all audited, all 404 when
+`FILEARR_AGENTS_ENABLED=false`):
+
+```bash
+# Create a group (settings validated; see the schema below)
+curl -s -X POST http://<ct-ip>:8484/api/v1/agents/config-groups \
+  -H 'content-type: application/json' -d '{
+    "name": "office-workstations",
+    "description": "Windows desktops, documents + downloads",
+    "settings": {
+      "log_level": "info",
+      "scan_selections": [
+        {"preset": "user-documents", "paths": [], "enabled": true},
+        {"preset": "downloads",
+         "paths": ["%USERPROFILE%/Downloads"],
+         "exclude_regex": ["\\.tmp$"],
+         "enabled": true}
+      ],
+      "inventory": {"enabled": true, "collectors": ["stat", "owner"]},
+      "scan_schedule_cron": "0 3 * * *"
+    }
+  }'
+
+curl -s http://<ct-ip>:8484/api/v1/agents/config-groups            # list (+member_count)
+curl -s http://<ct-ip>:8484/api/v1/agents/config-groups/<id>       # get
+curl -s -X PATCH .../config-groups/<id> -d '{"settings": {...}}'   # partial update
+curl -s -X DELETE .../config-groups/<id>                            # members -> NULL
+
+# Assign / clear a group on an agent
+curl -s -X PUT .../agents/<agent-id>/config-group -d '{"config_group_id": "<id>"}'
+curl -s -X PUT .../agents/<agent-id>/config-group -d '{"config_group_id": null}'
+```
+
+Deleting a group with members is **allowed** — the `ON DELETE SET NULL` FK falls
+every member back to `NULL` (built-in defaults), and the delete audit event
+records how many agents were reset (`members_reset`).
+
+### Settings schema (typed, versioned)
+
+The `settings` object is Pydantic-validated at the API. **Unknown top-level keys
+are rejected with 422** so a typo never silently no-ops (contrast the per-agent
+*policy* body in §6, which preserves unknown keys for forward-compat). Whole doc
+is capped at 64 KiB (422 beyond). All keys optional:
+
+| Key | Type | Notes |
+| --- | --- | --- |
+| `log_level` | `error`\|`warn`\|`info`\|`verbose`\|`debug` | agent log verbosity |
+| `scan_selections` | list of selection objects | see below (max 100) |
+| `inventory` | `{enabled: bool, collectors: [str]}` | collector names are free strings — W6-D3 defines the vocabulary; central only caps count/length |
+| `scan_schedule_cron` | cron string | cronsim-validated, exactly like `library.scan_cron` |
+
+A **scan selection**: `{preset, paths, include_regex, exclude_regex, enabled}`.
+
+- `preset` — one of the W6-R1 preset names (or `null`):
+  `user-documents`, `user-media`, `user-profiles-full`, `downloads`,
+  `server-data`, `custom`. See `docs/research/agent-inventory-presets.md` for the
+  per-OS folder expansions each resolves to.
+- `paths` — explicit path specs. A spec **MAY** carry env tokens
+  (`%USERPROFILE%`, `$HOME`, `~`) and glob segments (`/home/*/documents`,
+  `/data/{a,b}/[abc]*`). Central **validates syntax only** (non-empty, balanced
+  brackets/braces) and **never resolves a path** — final resolution is agent-side
+  and per-OS (Windows known-folder API, Linux `user-dirs.dirs`, macOS TCC), per
+  W6-R1.
+- `include_regex` / `exclude_regex` — refine matches. Central compiles each with
+  Python `re` as a **sanity gate only**; the authoritative match engine is the Go
+  agent's RE2/`regexp` (a pattern valid in one is not guaranteed valid in the
+  other, but the gate catches the common typo class).
+- `enabled` — gates the whole selection (default `true`).
+
+Example specs that PASS validation: `%USERPROFILE%/Documents`, `$HOME/documents`,
+`~/Documents`, `/home/*/documents`, `/data/{a,b}/[abc]*`. A spec like
+`/home/[user` (unbalanced bracket) is a 422.
+
+### Delivery + precedence (rides the policy channel)
+
+A group's settings are merged into the agent's effective policy doc
+(`GET /agents/{id}/policy`, §6) under a **new top-level `group` section**. The
+group's `updated_at` is folded into the policy `ETag`
+(`"<scope>/<version>/g:<tag>"`), so **any group edit invalidates the agent's
+cached policy** on its next `If-None-Match` poll.
+
+Precedence (most-specific wins):
+
+```text
+per-agent explicit policy keys  >  config-group settings  >  agent defaults
+```
+
+Concretely: a `NULL` config group adds **no** `group` section (and the ETag stays
+the pre-W6 `"<scope>/<version>"` form — current binaries are unaffected). An
+operator-authored top-level `group` key in a per-agent `agent-policies` row
+**wins** over the config group (never clobbered). New `group` keys are purely
+additive — an agent that ignores them behaves exactly as before.
+
+## 10. Console installer distribution (W6-D2)
+
+`POST /api/v1/agents/installer-config` (`admin` scope, audited) mints an
+enrollment token (§3 machinery) and returns the **complete sidecar** the console
+agent installer consumes (`filearr-agent.json`), plus token metadata and per-OS
+install hints:
+
+```bash
+curl -s -X POST http://<ct-ip>:8484/api/v1/agents/installer-config \
+  -H 'content-type: application/json' -d '{
+    "agent_name": "lab-01",
+    "config_group_id": "<group-id>",
+    "log_level": "info",
+    "central_url_override": "https://filearr.example.com",
+    "ttl_seconds": 3600
+  }'
+```
+
+Response (FROZEN contract for the UI, W6-D4):
+
+```json
+{
+  "sidecar": {
+    "central_url": "https://filearr.example.com",
+    "enrollment_token": "fae_…",        // raw, show-once
+    "agent_name": "lab-01",
+    "config_group": "office-workstations",  // by NAME
+    "log_level": "info"
+  },
+  "token_hash": "…",                     // for show/revoke in the UI
+  "expires_at": "2026-07-18T…Z",
+  "install_hint": {
+    "windows": "Invoke-WebRequest https://filearr.example.com/api/v1/agents/{agent_id}/releases/{version}/artifacts/filearr-agent-windows-amd64.exe -OutFile filearr-agent.exe; .\\filearr-agent.exe install --config filearr-agent.json",
+    "linux":   "curl -fsSL …/releases/{version}/artifacts/filearr-agent-linux-amd64 -o filearr-agent && chmod +x filearr-agent && ./filearr-agent install --config filearr-agent.json",
+    "macos":   "curl -fsSL …/releases/{version}/artifacts/filearr-agent-darwin-arm64 -o filearr-agent && chmod +x filearr-agent && ./filearr-agent install --config filearr-agent.json"
+  }
+}
+```
+
+Notes:
+
+- `central_url` is the request base URL unless `central_url_override` is set.
+- `config_group_id` (if given) must exist (422 otherwise) and is emitted in the
+  sidecar **by name** — the agent presents that name to `/agents/register`, which
+  resolves it back to `config_group_id`. An **unknown name at register is
+  fail-safe**: the agent enrolls with a `NULL` group and the register response
+  carries a `config_group_warning` — enrollment is never blocked.
+- The install-hint artifact URLs reference the §8 release-artifact download path
+  (`/agents/{agent_id}/releases/{version}/artifacts/{filename}`, agent-authed);
+  `{agent_id}`/`{version}` are placeholders the operator fills from the fleet
+  console after the machine has a signed cert.
+- Audit records the token hash + config group only — **never** the raw token.
+
+## 11. Extensible inventory framework (W6-D3)
+
+An `inventory` command walks an expanded set of roots and runs a set of per-file
+**collectors**, returning one NDJSON record per surviving entry plus an
+always-present summary. New inventory COMPOSITIONS (a preset + collector set) are
+authored centrally and need NO agent redeploy — the agent advertises the
+vocabulary it supports and an admin composes against it.
+
+**Command shape** (`kind: inventory`, created via the EXISTING command-creation
+endpoint — no new enqueue surface; the `kind` CHECK gained `inventory` in
+migration `c7d9e1f3a5b8`):
+
+```jsonc
+// POST /api/v1/agents/{id}/commands
+{
+  "kind": "inventory",
+  "item_id": "<uuid>",          // required by the shared endpoint (not item-scoped work)
+  "payload": {
+    "collectors":    ["stat", "owner", "perms", "placeholder"],
+    "preset":        "user-documents",  // W6-R1 preset, or null
+    "paths":         ["%USERPROFILE%\\Projects", "/srv/*/data"],
+    "include_regex": ["\\.docx?$"],     // RE2 (Go regexp), applied to rel paths
+    "exclude_regex": ["(?i)/temp/"],
+    "max_entries":   100000,
+    "max_depth":     0                  // 0 => unlimited
+  }
+}
+```
+
+**Path-expansion engine** (`agent/internal/pathspec`, SHARED — also the W6-D2
+group scan-root consumer): per spec, (1) env-token expansion — Windows `%VAR%`,
+POSIX `$VAR`/`${VAR}`, leading `~`; an unset variable fails that spec (recorded,
+never a literal walk); (2) glob — a spec with `* ? [` is `filepath.Glob`-expanded
+(existence-filtered; this is how `C:\Users\*\Documents` / `/home/*/docs` fan out),
+else it is a single literal root; (3) a global fan-out cap (default 10 000 roots)
+truncates + flags rather than erroring. RE2 include/exclude filters apply to rel
+paths during the walk. **Braces `{}` are NOT expanded** (stdlib Glob has no brace
+expansion — documented divergence from central's balance-only check).
+
+**Presets** (W6-R1) resolve to per-OS specs INSIDE the agent: Windows known
+folders via `SHGetKnownFolderPath` (KFM/OneDrive-redirect-correct) + profile-glob
+fallback; Linux `~/.config/user-dirs.dirs` (locale-translated names honored,
+`$HOME` fallback when absent); macOS fixed paths. `server-data` → `/srv`,
+`/var/www` on Linux only. The walk reuses the vetted exclusion bundles
+(`system_files`, `os_metadata`, `caches_temp`, `node_modules_build`, +
+default-on `hidden_dotfiles`).
+
+**Collectors** (v1 built-ins; all metadata-only — NEVER open content):
+
+- `stat` — size, mode, mtime, + access/creation times where cheap (per-OS).
+- `owner` — POSIX uid/gid + resolved names; Windows owner SID
+  (`GetNamedSecurityInfo`) + resolved account.
+- `perms` — POSIX mode bits + xattr NAME list (`Llistxattr`); Windows DACL
+  summary (ACE count + a compact per-trustee rights string, NOT an SDDL dump).
+- `placeholder` — Windows cloud-recall (`FILE_ATTRIBUTE_RECALL_ON_*`/`OFFLINE`)
+  detection without opening content; best-effort/absent elsewhere.
+
+An unknown collector name is fail-soft: the rest run; the name is listed under
+`summary.unknown_collectors`.
+
+**Results**: NDJSON `{path, rel, <collector fields>}`. If the encoded NDJSON is
+≤ 256 KiB it is INLINED in the command completion (`{summary, entries}`); larger,
+it is gzipped and POSTed to `POST /api/v1/agents/{id}/inventory-results`
+(header `X-Filearr-Command-Id`; 8 MiB cap; gzip-sniffed; write-if-absent →
+`{config_dir}/inventory/<command_id>.ndjson.gz`) and the completion carries
+`{summary, result_ref}`. The summary is ALWAYS present:
+`{roots_expanded, entries, denied, placeholders_skipped, duration_ms,
+collectors_run, collector_errors}` (+ diagnostics: `roots_truncated`,
+`entries_capped`, `denied_sample`, `expand_errors`, `unknown_collectors`).
+
+**Capability advertisement**: the agent attaches `capabilities:
+{inventory_collectors: [...], inventory_version: 1}` to EVERY command poll;
+central persists it VERBATIM on `agents.capabilities` (JSONB, migration
+`c7d9e1f3a5b8`; size-capped by `FILEARR_AGENT_CAPABILITIES_MAX_BYTES`, an oversize
+body is dropped, never a poll failure). **Follow-up (orchestrator):** expose
+`agents.capabilities` in the agents LIST serializer (`api/agents.py`) so the UI
+offers only supported collectors — deferred this round to avoid a concurrent-edit
+conflict on that file; it is a one-line field add to the list `AgentOut`.
+
+**W6-D2 → scan-root consumption seam**: at daemon start the agent resolves the
+group `scan_selections` policy through the SAME `pathspec` engine and LOGS +
+PERSISTS the effective roots to `{data_dir}/inventory/scan-roots.json` — it does
+NOT start a scan from them (auto-start is a deliberate follow-up needing the scan
+scheduler/cancellation coordination).
+
 ## Not yet wired (later phase-5 tasks)
 
 - **P5-T4/T5**: replication (outbox → `replication-batch`) + reconciliation.

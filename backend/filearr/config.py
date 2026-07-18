@@ -835,6 +835,21 @@ class Settings(BaseSettings):
     # is small (preset names + a handful of glob lists + scalar tunables); 64 KiB
     # is generous headroom for the forward-compat unknown-key passthrough.
     agent_policy_max_bytes: int = 65536
+    # --- W6-D3 extensible inventory framework --------------------------------
+    # Hard cap (bytes of compact JSON) on the additive ``capabilities`` object an
+    # agent attaches to a command poll (inventory collector vocabulary + version).
+    # Small by nature; a body above this is refused (413) so a hostile/buggy agent
+    # cannot bloat the row it is stored on.
+    agent_capabilities_max_bytes: int = 16384
+    # Hard cap (bytes) on a gzip-NDJSON inventory RESULT blob POSTed to
+    # /agents/{id}/inventory-results. A small result inlines in the command
+    # completion (agent_command_result_max_bytes); a larger one uploads here. 8 MiB
+    # mirrors the thumbnail/small-blob posture (NOT the multi-GB staging plane).
+    agent_inventory_result_max_bytes: int = 8 * 1024 * 1024
+    # Directory the inventory-results receiver writes ``<command_id>.ndjson.gz``
+    # under. None => ``{config_dir}/inventory`` (writable central disk, not a media
+    # mount — invariant 6).
+    inventory_dir: str | None = None
     # --- P5-T6 agent-plane mTLS enforcement ----------------------------------
     # How the agent plane (replication / reconcile / policy / commands) proves an
     # agent's identity. Three modes (all preserve the 401/403/404 semantics):

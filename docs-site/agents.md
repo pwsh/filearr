@@ -25,6 +25,80 @@ to the central server over mTLS.
 The agent is a single static Go binary (no cgo), cross-compiled for Windows,
 macOS and Linux, using a pure-Go SQLite/FTS5 store.
 
+## Installing the agent (service + sidecar config)
+
+The recommended install path starts from the **Agents page** in the central
+console (`#/agents`): the *Enrollment & installer* card mints an enrollment
+token and generates a ready-to-use `filearr-agent.json` **sidecar config** —
+a plain, user-editable JSON file the agent picks up during install:
+
+```json
+{
+  "central_url": "https://filearr.example.com",
+  "enrollment_token": "fae_…",
+  "agent_name": "",
+  "config_group": "default",
+  "log_level": "info"
+}
+```
+
+Download the platform binary and the sidecar into one folder, then (as
+admin/root):
+
+```bash
+filearr-agent install --config filearr-agent.json
+```
+
+`install` copies the binary into the platform's install location
+(`%ProgramFiles%\Filearr Agent` on Windows; `/usr/local/bin` with config in
+`/etc/filearr-agent`, data in `/var/lib/filearr-agent`, and logs in
+`/var/log/filearr-agent` on Linux), enrolls non-interactively when a token is
+present, and registers an **auto-starting system service with
+restart-on-failure** (Windows SCM, systemd, or launchd). Re-running `install`
+upgrades in place; `filearr-agent uninstall` removes the service and binary
+(`--purge` also removes data/logs/config); `filearr-agent service
+status|start|stop|restart` manages it day to day.
+
+The enrollment token in the sidecar is **one-shot**: after a successful
+enroll the file is rewritten with the token removed and a consumption
+timestamp in its place. Every other field stays user-editable; explicit CLI
+flags and environment variables override sidecar values.
+
+Logging is definable per install or per configuration group:
+`error`, `warn`, `info`, `verbose`, `debug` — with rotating file logs
+(10 MiB × 5, compressed) in the platform log directory.
+
+## Configuration groups (remote configuration)
+
+Agents can be assigned to **configuration groups** managed on the Agents
+page. A group carries typed settings delivered over the signed policy
+channel (an edit invalidates agent caches immediately): log level, scan
+selections, inventory settings, and an optional scan schedule. Scan
+selections accept **predefined per-OS presets** (`user-documents`,
+`user-media`, `user-profiles-full`, `downloads`, `server-data`) or explicit
+path specs with environment-token expansion (`%USERPROFILE%`, `$HOME`, `~`),
+multi-user globs (`/home/*/documents`), and regex include/exclude filters —
+all expanded **on the agent**, never centrally. Presets resolve real
+locations (Windows known folders — OneDrive-redirect aware; Linux XDG
+`user-dirs.dirs`, locale-proof; macOS user folders) and exclude system
+files, thumbnails, caches, and other junk by default. Cloud-placeholder
+files (e.g. OneDrive online-only) are detected from attributes and **never
+opened**, so an inventory can't accidentally hydrate a user's cloud drive.
+
+## Inventory commands (extensible, no redeploy)
+
+Beyond media scanning, agents accept generic **inventory commands**: a
+composition of *collectors* over a preset or path selection. Built-in
+collectors: `stat` (sizes/timestamps), `owner` (POSIX uid/gid or Windows
+owner account), `perms` (POSIX mode + xattr names, or a compact Windows ACL
+summary), and `placeholder` (cloud-placeholder detection). Each agent
+advertises the collectors it supports, and new **compositions** — for
+example adding permission enumeration to a documents sweep — need no agent
+redeployment; genuinely new collectors arrive through the signed self-update
+channel. Results return inline for small runs or as a compressed upload for
+large ones, always with a summary (roots expanded, entries, access-denied
+count, placeholders skipped, per-collector errors).
+
 ## Enrollment walkthrough
 
 Enrollment follows a **register-first** trust model: registration precedes

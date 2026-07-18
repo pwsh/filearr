@@ -29,11 +29,11 @@ info.
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import agentsync, audit
@@ -105,6 +105,10 @@ class RegisterIn(BaseModel):
     platform: str  # windows | macos | linux (validated in agentsync)
     name: str | None = Field(default=None, max_length=255)
     agent_version: str | None = Field(default=None, max_length=64)
+    # W6-D2: config group by NAME (from the installer sidecar). Resolved to
+    # config_group_id at register; an unknown name is fail-safe (NULL group +
+    # a warning in the response), never a registration failure.
+    config_group: str | None = Field(default=None, max_length=128)
 
 
 class CaBootstrap(BaseModel):
@@ -129,6 +133,9 @@ class RegisterOut(BaseModel):
     # but cannot fetch a cert until the operator plumbs the key (re-issue via
     # POST /agents/{id}/ca-ott once configured).
     ca_ott: str | None = None
+    # W6-D2: null on success; set to a human-readable string when a supplied
+    # ``config_group`` name did not resolve (agent enrolled with NULL group).
+    config_group_warning: str | None = None
 
 
 class CertBindIn(BaseModel):
@@ -159,6 +166,13 @@ class AgentOut(BaseModel):
     policy_version_applied: int | None
     revoked_at: datetime | None
     created_at: datetime
+    # W6-D4: current config-group assignment (NULL = built-in defaults). Lets the
+    # fleet console reflect + drive the inline group dropdown without an N+1.
+    config_group_id: uuid.UUID | None
+    # W6-D3: capability advertisement persisted from the agent's command poll
+    # ({inventory_collectors, inventory_version}; NULL until the agent's first
+    # post-W6 poll). The console offers only collectors an agent supports.
+    capabilities: dict | None = None
 
 
 def _ca_bootstrap(settings) -> CaBootstrap:
@@ -205,6 +219,8 @@ def _agent_out(a: Agent) -> AgentOut:
         policy_version_applied=a.policy_version_applied,
         revoked_at=a.revoked_at,
         created_at=a.created_at,
+        config_group_id=a.config_group_id,
+        capabilities=a.capabilities,
     )
 
 
@@ -321,13 +337,14 @@ async def register(
     PENDING (no cert yet); it then CSRs against step-ca with the returned id in
     its CN/SAN and binds the fingerprint via ``/certificate``."""
     try:
-        agent, raw_secret = await agentsync.register_agent(
+        agent, raw_secret, config_group_warning = await agentsync.register_agent(
             session,
             raw_token=body.token,
             hostname=body.hostname,
             platform=body.platform,
             name=body.name,
             agent_version=body.agent_version,
+            config_group=body.config_group,
         )
     except EnrollmentError as err:
         await session.rollback()
@@ -368,6 +385,7 @@ async def register(
         enroll_secret=raw_secret,
         ca=_ca_bootstrap(settings),
         ca_ott=ca_ott,
+        config_group_warning=config_group_warning,
     )
 
 
@@ -446,6 +464,67 @@ async def reissue_ca_ott(
 # --------------------------------------------------------------------------- #
 # Fleet console (admin)                                                        #
 # --------------------------------------------------------------------------- #
+class AgentFleetSummary(BaseModel):
+    """W6-D4 status header tallies. ``connected``/``disconnected`` split the
+    *active* (cert-bound, not revoked) agents by liveness against
+    ``agent_online_threshold_seconds``; ``pending``/``revoked`` come straight from
+    lifecycle status. ``total`` == connected + disconnected + pending + revoked."""
+
+    total: int
+    connected: int
+    disconnected: int
+    pending: int
+    revoked: int
+
+
+@router.get(
+    "/agents/summary",
+    response_model=AgentFleetSummary,
+    dependencies=[Depends(require_agents_enabled), Depends(require_scope("read"))],
+)
+async def agent_fleet_summary(
+    session: AsyncSession = Depends(get_session),
+) -> AgentFleetSummary:
+    """Fleet status counts for the W6-D4 header, in ONE conditional-aggregation
+    query (Postgres ``count(*) FILTER (WHERE …)`` — no N+1). Lifecycle mirrors
+    :func:`agentsync.agent_status`: revoked (``revoked_at`` set) > active
+    (``cert_fingerprint`` bound) > pending. An *active* agent is CONNECTED when it
+    was last seen within ``agent_online_threshold_seconds``; otherwise (older, or
+    never seen) DISCONNECTED."""
+    settings = get_settings()
+    cutoff = datetime.now(UTC) - timedelta(
+        seconds=settings.agent_online_threshold_seconds
+    )
+    # Lifecycle predicates.
+    is_revoked = Agent.revoked_at.is_not(None)
+    is_pending = Agent.revoked_at.is_(None) & Agent.cert_fingerprint.is_(None)
+    is_active = Agent.revoked_at.is_(None) & Agent.cert_fingerprint.is_not(None)
+    is_fresh = Agent.last_seen_at.is_not(None) & (Agent.last_seen_at >= cutoff)
+    row = (
+        await session.execute(
+            select(
+                func.count().label("total"),
+                func.count().filter(is_revoked).label("revoked"),
+                func.count().filter(is_pending).label("pending"),
+                func.count().filter(is_active & is_fresh).label("connected"),
+                func.count()
+                .filter(
+                    is_active
+                    & or_(Agent.last_seen_at.is_(None), Agent.last_seen_at < cutoff)
+                )
+                .label("disconnected"),
+            )
+        )
+    ).one()
+    return AgentFleetSummary(
+        total=row.total,
+        connected=row.connected,
+        disconnected=row.disconnected,
+        pending=row.pending,
+        revoked=row.revoked,
+    )
+
+
 @router.get(
     "/agents",
     response_model=list[AgentOut],

@@ -7,6 +7,7 @@
   import SearchPage from "./lib/SearchPage.svelte";
   import TimelinePage from "./lib/TimelinePage.svelte";
   import ReportsPage from "./lib/ReportsPage.svelte";
+  import AgentsPage from "./lib/AgentsPage.svelte";
   import FilterBuilderPage from "./lib/FilterBuilderPage.svelte";
   import HelpPage from "./lib/HelpPage.svelte";
   import LoginPage from "./lib/LoginPage.svelte";
@@ -19,7 +20,7 @@
   // UI-T9 — hash-based routing so a refresh keeps the current tab and
   // back/forward toggles between them. `#/search` (default), `#/admin`,
   // `#/jobs` (UI-T10 jobs dashboard).
-  type Page = "search" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "filter-builder" | "help";
+  type Page = "search" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "filter-builder" | "help";
   function routeFromHash(): { page: Page; browseLib: string; browsePath: string } {
     const browse = parseBrowseHash(location.hash);
     if (browse) return { page: "browse", browseLib: browse.libraryId, browsePath: browse.path };
@@ -28,6 +29,7 @@
     if (location.hash === "#/alerts") return { page: "alerts", browseLib: "", browsePath: "" };
     if (location.hash === "#/timeline") return { page: "timeline", browseLib: "", browsePath: "" };
     if (location.hash === "#/reports") return { page: "reports", browseLib: "", browsePath: "" };
+    if (location.hash === "#/agents") return { page: "agents", browseLib: "", browsePath: "" };
     if (location.hash === "#/filter-builder") return { page: "filter-builder", browseLib: "", browsePath: "" };
     if (location.hash === "#/help") return { page: "help", browseLib: "", browsePath: "" };
     return { page: "search", browseLib: "", browsePath: "" };
@@ -55,10 +57,14 @@
   // (FILEARR_SOURCE_URL) so a fork can point users at its modified source without
   // a frontend rebuild; fall back to the Vite build-time default.
   let sourceUrl = $state<string>(__SOURCE_URL__);
+  // P5-T1/W6-D4: the distributed-agent feature is opt-in (FILEARR_AGENTS_ENABLED);
+  // gate the Agents nav entry so it only shows when the surface is live.
+  let agentsEnabled = $state(false);
   getVersion()
     .then((v) => {
       buildStamp = v.build_stamp;
       if (v.source_url) sourceUrl = v.source_url;
+      agentsEnabled = !!v.agents_enabled;
     })
     .catch(() => {});
 
@@ -152,6 +158,11 @@
       <button
         class="rounded-lg px-3 py-1 text-sm {page === 'reports' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
         onclick={() => goto("reports")}>Reports</button>
+      {#if agentsEnabled}
+        <button
+          class="rounded-lg px-3 py-1 text-sm {page === 'agents' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
+          onclick={() => goto("agents")}>Agents</button>
+      {/if}
       <button
         class="rounded-lg px-3 py-1 text-sm {page === 'filter-builder' ? 'bg-[var(--accent)] text-white' : 'text-slate-500'}"
         onclick={() => goto("filter-builder")}>Filter builder</button>
@@ -193,6 +204,8 @@
     <TimelinePage />
   {:else if page === "reports"}
     <ReportsPage />
+  {:else if page === "agents"}
+    <AgentsPage />
   {:else if page === "filter-builder"}
     <FilterBuilderPage />
   {:else if page === "help"}

@@ -279,6 +279,78 @@ async def test_list_and_revoke_agent(client):
 
 
 # --------------------------------------------------------------------------- #
+# Fleet summary (W6-D4 status header)                                          #
+# --------------------------------------------------------------------------- #
+async def _seed_agent(maker, *, name, cert_fingerprint=None, last_seen_at=None,
+                      revoked_at=None):
+    async with maker() as s:
+        s.add(
+            Agent(
+                name=name,
+                hostname=name,
+                platform="linux",
+                cert_fingerprint=cert_fingerprint,
+                last_seen_at=last_seen_at,
+                revoked_at=revoked_at,
+            )
+        )
+        await s.commit()
+
+
+async def test_fleet_summary_empty_all_zero(client):
+    c, _, _ = client
+    s = (await c.get("/api/v1/agents/summary")).json()
+    assert s == {
+        "total": 0, "connected": 0, "disconnected": 0, "pending": 0, "revoked": 0,
+    }
+
+
+async def test_fleet_summary_counts_lifecycle_and_liveness(client):
+    """A mix of every lifecycle × liveness state tallies into the right bucket."""
+    c, maker, _ = client
+    now = datetime.now(UTC)
+    # connected: active (cert bound) + fresh last_seen.
+    await _seed_agent(maker, name="conn", cert_fingerprint="fpc", last_seen_at=now)
+    # disconnected: active but stale last_seen.
+    await _seed_agent(
+        maker, name="stale", cert_fingerprint="fps",
+        last_seen_at=now - timedelta(hours=1),
+    )
+    # disconnected: active, never seen.
+    await _seed_agent(maker, name="never", cert_fingerprint="fpn", last_seen_at=None)
+    # pending: no cert yet — a fresh last_seen must NOT count as connected.
+    await _seed_agent(maker, name="pend", last_seen_at=now)
+    # revoked: wins over an active cert + fresh last_seen.
+    await _seed_agent(
+        maker, name="rev", cert_fingerprint="fpr", last_seen_at=now, revoked_at=now,
+    )
+
+    s = (await c.get("/api/v1/agents/summary")).json()
+    assert s == {
+        "total": 5, "connected": 1, "disconnected": 2, "pending": 1, "revoked": 1,
+    }
+
+
+async def test_fleet_summary_respects_online_threshold(client):
+    """An agent just inside vs just past the online window flips buckets."""
+    c, maker, settings = client
+    now = datetime.now(UTC)
+    thresh = settings.agent_online_threshold_seconds
+    await _seed_agent(
+        maker, name="justin", cert_fingerprint="fp1",
+        last_seen_at=now - timedelta(seconds=thresh - 30),
+    )
+    await _seed_agent(
+        maker, name="justout", cert_fingerprint="fp2",
+        last_seen_at=now - timedelta(seconds=thresh + 30),
+    )
+    s = (await c.get("/api/v1/agents/summary")).json()
+    assert s["total"] == 2
+    assert s["connected"] == 1
+    assert s["disconnected"] == 1
+
+
+# --------------------------------------------------------------------------- #
 # Hard delete (?purge=true) + consumed-token force delete                       #
 # --------------------------------------------------------------------------- #
 async def test_purge_pending_agent_hard_deletes(client):

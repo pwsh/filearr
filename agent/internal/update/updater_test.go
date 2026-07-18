@@ -179,6 +179,61 @@ func TestApplyUpdateSwapsAndWritesState(t *testing.T) {
 	}
 }
 
+// TestApplyUpdateServiceManagedExitsForRestart verifies the service-managed path:
+// the A/B swap still happens and the boot state is written, but instead of
+// self-re-execing the updater exits with ServiceRestartExitCode so the service
+// manager restarts the new binary.
+func TestApplyUpdateServiceManagedExitsForRestart(t *testing.T) {
+	pub, priv := testKeypair(t)
+	art := []byte("NEW-BINARY-BYTES")
+	fc := &fakeCentral{t: t, manifest: signedManifest(t, priv, "1.5.0", "agent-linux-amd64", art, "linux", "amd64"), artifact: art, artifactN: "agent-linux-amd64"}
+	srv := httptest.NewServer(fc.handler())
+	defer srv.Close()
+
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "filearr-agent")
+	writeFile(t, exe, "OLD-BINARY")
+
+	reExeced := false
+	var exitCode = -1
+	u := New(Config{
+		BaseURL:        srv.URL,
+		AgentID:        "00000000-0000-0000-0000-000000000001",
+		DataDir:        dir,
+		CurrentVersion: "1.4.0",
+		PublicKey:      pub,
+		ExePath:        exe,
+		Platform:       "linux",
+		Arch:           "amd64",
+		ServiceManaged: true,
+		reExec:         func(string, []string) error { reExeced = true; return nil },
+		exit:           func(c int) { exitCode = c },
+	})
+
+	m, a, ok, err := u.CheckForUpdate(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("check: ok=%v err=%v", ok, err)
+	}
+	if err := u.ApplyUpdate(context.Background(), m, a); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	// Swap happened.
+	if got := readFile(t, exe); got != "NEW-BINARY-BYTES" {
+		t.Fatalf("binary not swapped: %q", got)
+	}
+	// But NO self-re-exec — the service manager owns the restart.
+	if reExeced {
+		t.Fatal("service-managed update must NOT self-re-exec")
+	}
+	if exitCode != ServiceRestartExitCode {
+		t.Fatalf("exit code = %d, want ServiceRestartExitCode(%d)", exitCode, ServiceRestartExitCode)
+	}
+	// Boot-counter state is left for the next boot's health/rollback check.
+	if st, _ := LoadState(dir); st == nil || st.NewVersion != "1.5.0" {
+		t.Fatalf("boot state not persisted: %+v", st)
+	}
+}
+
 func TestDownloadRefusesSha256Mismatch(t *testing.T) {
 	pub, priv := testKeypair(t)
 	art := []byte("REAL-BYTES")

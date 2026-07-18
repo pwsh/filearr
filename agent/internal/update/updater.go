@@ -26,6 +26,14 @@ const (
 // downloadSubdir is where artifacts are staged under DataDir before the swap.
 const downloadSubdir = "updates"
 
+// ServiceRestartExitCode is the non-zero exit code the updater uses to hand a
+// post-swap (or post-rollback) restart back to the service manager. It is a
+// FAILURE code on purpose: systemd (Restart=on-failure) and the Windows SCM
+// (OnFailure=restart) only relaunch on a non-zero exit, and launchd (KeepAlive)
+// relaunches on any exit — so a single non-zero code triggers a restart on all
+// three. The next boot's BootCheck then runs the health-window/rollback dance.
+const ServiceRestartExitCode = 20
+
 // Config wires an Updater. Zero-valued optional fields take the defaults above.
 type Config struct {
 	BaseURL string
@@ -54,6 +62,13 @@ type Config struct {
 
 	Interval     time.Duration
 	HealthWindow time.Duration
+
+	// ServiceManaged marks the process as running under an OS service manager
+	// (systemd/launchd/Windows SCM). When set, ApplyUpdate and a rollback exit the
+	// process (with ServiceRestartExitCode) after the A/B swap instead of
+	// self-re-execing, so the service manager owns the restart into the new/old
+	// binary. A self-re-exec would race the manager and can leave two instances.
+	ServiceManaged bool
 
 	Logger *slog.Logger
 	Clock  func() time.Time
@@ -197,6 +212,14 @@ func (u *Updater) ApplyUpdate(ctx context.Context, m *Manifest, a *Artifact) err
 		_ = os.Remove(newBinary)
 		return err
 	}
+	if u.cfg.ServiceManaged {
+		// Under a service manager, exit and let it restart BinPath (now the new
+		// binary). A self-re-exec would race the manager's own restart. The
+		// boot-counter state is already on disk for the next boot's BootCheck.
+		u.log.Info("update applied; exiting for service-managed restart", "version", m.Version, "path", exe, "exit_code", ServiceRestartExitCode)
+		u.cfg.exit(ServiceRestartExitCode)
+		return nil // unreachable in production (exit); reachable when exit is stubbed in tests
+	}
 	u.log.Info("update applied; re-executing", "version", m.Version, "path", exe)
 	if err := u.cfg.reExec(exe, os.Args); err != nil {
 		// The new binary is in place but re-exec failed; the service supervisor
@@ -250,6 +273,13 @@ func (u *Updater) BootCheck(ctx context.Context) (healthPending bool, err error)
 			return false, fmt.Errorf("rollback restore: %w", err)
 		}
 		_ = ClearState(u.cfg.DataDir)
+		if u.cfg.ServiceManaged {
+			// As with ApplyUpdate: hand the restart to the service manager rather
+			// than self-re-execing the restored binary.
+			u.log.Warn("rolled back to previous binary; exiting for service-managed restart", "exit_code", ServiceRestartExitCode)
+			u.cfg.exit(ServiceRestartExitCode)
+			return false, nil // unreachable in production
+		}
 		if err := u.cfg.reExec(exe, os.Args); err != nil {
 			return false, fmt.Errorf("rollback re-exec: %w", err)
 		}

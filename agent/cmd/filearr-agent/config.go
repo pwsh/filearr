@@ -18,6 +18,9 @@ type config struct {
 	Token      string // single-use enrollment token (enroll only)
 	DataDir    string // where key/cert/state are persisted
 	Name       string // optional friendly agent name
+	ConfigPath string // path to the sidecar config (informational; resolved in setupRuntime)
+	LogLevel   string // resolved log level name (informational; applied in setupRuntime)
+	LogDir     string // resolved log directory (informational; applied in setupRuntime)
 }
 
 const (
@@ -26,6 +29,8 @@ const (
 	envDataDir           = "FILEARR_AGENT_DATA_DIR"
 	envName              = "FILEARR_AGENT_NAME"
 	envReconcileInterval = "FILEARR_AGENT_RECONCILE_INTERVAL"
+	envLogLevel          = "FILEARR_AGENT_LOG_LEVEL"
+	envLogDir            = "FILEARR_AGENT_LOG_DIR"
 )
 
 // defaultReconcileInterval is the slow periodic full-manifest sweep cadence and

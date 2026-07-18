@@ -73,8 +73,17 @@ EXAMPLES:
      filearr-agent scan -root /mnt/media -watch      keep watching for changes
 
    Run the background daemon (replication, verification, policy, local query
-   API, web UI, self-update) — wrap this in a service for real installs:
+   API, web UI, self-update) — usually managed as a service (see 'install'):
      filearr-agent run
+
+   Install as a system service (Windows/Linux/macOS; requires admin/root). Copies
+   the binary into place, enrolls if a token is configured, then registers +
+   starts an auto-start, restart-on-failure service. Re-running upgrades in place:
+     filearr-agent install
+     filearr-agent install --config /etc/filearr-agent/filearr-agent.json
+     filearr-agent service status | start | stop | restart
+     filearr-agent uninstall            keep data/logs/config
+     filearr-agent uninstall --purge    also delete data/logs/config
 
    Search the local index (works fully offline; results are typo-tolerant):
      filearr-agent query 'kind:video size:>1G arcane'
@@ -85,6 +94,16 @@ EXAMPLES:
      filearr-agent reconcile        full-manifest consistency sweep
      filearr-agent policy -fetch    pull + apply the central policy now
      filearr-agent update -check    is a signed update available?
+
+   Configuration precedence (highest first): explicit CLI flag > FILEARR_AGENT_*
+   env var > sidecar file (filearr-agent.json) > built-in default. The sidecar is
+   found via --config, then beside the executable, then the OS config dir; it
+   carries central_url, enrollment_token (one-shot; erased after enroll),
+   agent_name, config_group, data_dir, log_level, log_dir.
+
+   Logging: --log-level error|warn|info|verbose|debug (default info); --log-dir
+   <dir> writes a rotating filearr-agent.log (10 MiB x5, gzip) and also echoes to
+   stderr on a tty. Env equivalents FILEARR_AGENT_LOG_LEVEL / _LOG_DIR / _CONFIG.
 
    Every command also reads FILEARR_AGENT_* environment variables in place of
    flags (FILEARR_AGENT_CENTRAL_URL, FILEARR_AGENT_TOKEN, FILEARR_AGENT_DATA_DIR,
@@ -106,6 +125,9 @@ EXAMPLES:
 			legacyCommand("reconcile", "Full-manifest reconciliation sweep of all roots (one-shot)", runReconcile),
 			legacyCommand("policy", "Print the cached central policy, or --fetch a one-shot poll+apply", runPolicy),
 			legacyCommand("update", "Check for a signed agent update and apply it [--check to only report]", runUpdate),
+			legacyCommand("install", "Install as a system service: copy the binary, optionally enroll, register + start (auto-start, restart-on-failure); idempotent (re-run upgrades in place)", runInstall),
+			legacyCommand("uninstall", "Stop + deregister the service and remove the installed binary [--purge also deletes data/logs/config]", runUninstall),
+			legacyCommand("service", "Manage the installed service: service status|start|stop|restart", runService),
 			legacyCommand("search", "Query the local index by opening the index file directly (legacy debug path; prefer `query`)", runSearch),
 			queryCommand(),
 			versionCommand(),
@@ -133,6 +155,11 @@ func versionCommand() *cli.Command {
 // through to the original flag.FlagSet, so flag/env/behavior stay byte-compatible;
 // urfave only owns dispatch, help listing, and the command name. The returned
 // error is prefixed with the command name to preserve the old message shape.
+//
+// Before the handler runs, setupRuntime resolves the sidecar config and
+// configures the process logger (level + optional rotating file) from the
+// precedence flag > env > sidecar > default, so every command shares one
+// consistent logging + fallback-config setup.
 func legacyCommand(name, usage string, run func(args []string) error) *cli.Command {
 	return &cli.Command{
 		Name:            name,
@@ -140,7 +167,9 @@ func legacyCommand(name, usage string, run func(args []string) error) *cli.Comma
 		SkipFlagParsing: true,
 		HideHelpCommand: true,
 		Action: func(_ context.Context, cmd *cli.Command) error {
-			if err := run(cmd.Args().Slice()); err != nil {
+			args := cmd.Args().Slice()
+			setupRuntime(name, args)
+			if err := run(args); err != nil {
 				return fmt.Errorf("%s: %w", name, err)
 			}
 			return nil

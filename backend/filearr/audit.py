@@ -69,6 +69,16 @@ AGENT_RECONCILED = "agent_reconciled"
 # P5-T6 config/policy push: an operator writes a new policy version (records the
 # scope + new version only, NEVER the policy body).
 AGENT_POLICY_UPDATED = "agent_policy_updated"
+# W6-D2 agent configuration groups (remote configuration). Create/update/delete
+# record the group id + name (delete also records the member count that fell back
+# to NULL); assign records the agent + old/new group. The settings body is NEVER
+# recorded. installer_config_issued records an installer-sidecar mint (token hash
+# + config group only — never the raw enrollment token).
+AGENT_CONFIG_GROUP_CREATED = "agent_config_group_created"
+AGENT_CONFIG_GROUP_UPDATED = "agent_config_group_updated"
+AGENT_CONFIG_GROUP_DELETED = "agent_config_group_deleted"
+AGENT_CONFIG_GROUP_ASSIGNED = "agent_config_group_assigned"
+AGENT_INSTALLER_CONFIG_ISSUED = "agent_installer_config_issued"
 # P10-T1 on-demand agent command primitive (admin enqueue/cancel; NOT per-poll)
 AGENT_COMMAND_ENQUEUED = "agent_command_enqueued"
 AGENT_COMMAND_CANCELLED = "agent_command_cancelled"

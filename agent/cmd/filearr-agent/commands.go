@@ -2,15 +2,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
+	"github.com/filearr/filearr/agent/internal/agentlog"
 	"github.com/filearr/filearr/agent/internal/commands"
 	agentcfg "github.com/filearr/filearr/agent/internal/config"
 	"github.com/filearr/filearr/agent/internal/enroll"
 	"github.com/filearr/filearr/agent/internal/index"
+	"github.com/filearr/filearr/agent/internal/inventory"
+	"github.com/filearr/filearr/agent/internal/pathspec"
 )
 
 // Command-poller env fallbacks (flags are not plumbed for this loop — it is a
@@ -34,6 +39,11 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		HTTP:         httpClient,
 		Executor:     commands.NewExecutor(idx, 0), // 0 => central default size ceiling
 		RateProvider: uploadRateProvider(),
+		// W6-D3: the inventory runner (real OS host) + the additive capability
+		// advertisement it attaches to every poll so central can store what this
+		// agent supports.
+		Inventory:    inventory.NewRunner(nil, nil),
+		Capabilities: inventory.Capabilities(),
 		MaxCommands:  envInt(envCommandPollMax, 10),
 		Interval:     envDuration(envCommandPollInterval, 60*time.Second),
 		LeaseSeconds: envInt(envCommandLeaseSeconds, 300),
@@ -42,6 +52,10 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		// W6-D3 consumption seam: resolve the group scan_selections policy into the
+		// effective scan-root set once at startup (logged + persisted), WITHOUT
+		// starting a scan — proves the policy vocabulary resolves end-to-end.
+		consumeScanRootSeam(envOr(envDataDir, defaultDataDir()))
 		// Run only returns on ctx cancellation (a poll failure backs off, never
 		// exits); a non-cancel error is logged but must not crash the daemon.
 		if err := poller.Run(ctx); err != nil && ctx.Err() == nil {
@@ -49,6 +63,38 @@ func startCommandPoller(ctx context.Context, idx *index.Store, certStore *enroll
 		}
 	}()
 	return done
+}
+
+// consumeScanRootSeam reads the cached group policy, expands its scan_selections
+// into the effective scan-root set via the SHARED pathspec engine, and LOGS +
+// PERSISTS the result to <dataDir>/inventory/scan-roots.json. It deliberately does
+// NOT start a scan (W6-D3): auto-start from a group policy is a follow-up that must
+// coordinate with the scan scheduler/cancellation path. Best-effort throughout — a
+// missing cache or unwritable dir is logged at debug and never fatal.
+func consumeScanRootSeam(dataDir string) {
+	log := newLogger()
+	doc, ok, err := agentcfg.NewETagCache(dataDir).Load()
+	if err != nil || !ok {
+		return // no cached policy yet; nothing to consume
+	}
+	res := inventory.ExpandScanSelections(pathspec.OSHost(), doc.Policy)
+	if res.SelectionsCount == 0 {
+		return // no group scan_selections configured
+	}
+	log.Info("group scan_selections resolved (seam only — no scan started)",
+		"selections", res.SelectionsCount, "roots", len(res.Roots), "truncated", res.Truncated)
+	dir := filepath.Join(dataDir, "inventory")
+	if mkErr := os.MkdirAll(dir, 0o755); mkErr != nil {
+		agentlog.Verbose(log, "scan-root seam: cannot create dir", "err", mkErr)
+		return
+	}
+	blob, mErr := json.MarshalIndent(res, "", "  ")
+	if mErr != nil {
+		return
+	}
+	if wErr := os.WriteFile(filepath.Join(dir, "scan-roots.json"), blob, 0o644); wErr != nil {
+		agentlog.Verbose(log, "scan-root seam: cannot persist", "err", wErr)
+	}
 }
 
 // uploadRateProvider returns the per-agent staging-upload rate cap (bytes/sec, 0

@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/filearr/filearr/agent/internal/inventory"
 )
 
 // Defaults (mirroring the central caps in config.py). The poll cap is clamped
@@ -42,6 +44,16 @@ type Config struct {
 	// on the next upload (documented).
 	RateProvider func() int64
 
+	// Inventory runs W6-D3 `inventory` commands. Nil => the inventory kind is
+	// unsupported (completed ok=false with a note), so an older agent build degrades
+	// cleanly against a central that enqueues one.
+	Inventory *inventory.Runner
+
+	// Capabilities is the additive advertisement attached to EVERY poll body
+	// (inventory collector vocabulary + version); central stores it on the agent
+	// row so the UI can offer only composable collectors. Nil => omitted.
+	Capabilities map[string]any
+
 	// MaxCommands drained per poll (default 10); Interval between polls (default
 	// 60s); LeaseSeconds is the picked_up lease whose third is the ack-heartbeat
 	// cadence during a slow content hash (default 300 -> heartbeat every ~100s).
@@ -64,6 +76,8 @@ type Poller struct {
 	http         *http.Client
 	exec         *Executor
 	rateProvider func() int64
+	inv          *inventory.Runner
+	caps         map[string]any
 	maxCmds      int
 	interval     time.Duration
 	leaseSecs    int
@@ -81,6 +95,8 @@ func NewPoller(cfg Config) *Poller {
 		http:         cfg.HTTP,
 		exec:         cfg.Executor,
 		rateProvider: cfg.RateProvider,
+		inv:          cfg.Inventory,
+		caps:         cfg.Capabilities,
 		maxCmds:      cfg.MaxCommands,
 		interval:     cfg.Interval,
 		leaseSecs:    cfg.LeaseSeconds,
@@ -180,6 +196,8 @@ func (p *Poller) process(ctx context.Context, cmd commandOut) {
 		p.processVerify(ctx, cmd)
 	case KindStageUpload:
 		p.processStageUpload(ctx, cmd)
+	case KindInventory:
+		p.processInventory(ctx, cmd)
 	default:
 		p.complete(ctx, cmd.ID, false, map[string]any{"error": fmt.Sprintf("unknown command kind %q", cmd.Kind)})
 	}
@@ -238,7 +256,13 @@ func (p *Poller) heartbeat(ctx context.Context, commandID string) {
 
 func (p *Poller) poll(ctx context.Context) ([]commandOut, error) {
 	url := fmt.Sprintf("%s/api/v1/agents/%s/commands/poll", p.baseURL, p.agentID)
-	status, body, err := p.post(ctx, url, map[string]any{"max": p.maxCmds})
+	reqBody := map[string]any{"max": p.maxCmds}
+	if p.caps != nil {
+		// Additive capability advertisement — central persists it on the agent row.
+		// An older central that ignores the field is unaffected.
+		reqBody["capabilities"] = p.caps
+	}
+	status, body, err := p.post(ctx, url, reqBody)
 	if err != nil {
 		return nil, err
 	}

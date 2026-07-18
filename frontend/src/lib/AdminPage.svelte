@@ -21,7 +21,6 @@
   import UsersPanel from "./UsersPanel.svelte";
   import SessionsPanel from "./SessionsPanel.svelte";
   import AuditPanel from "./AuditPanel.svelte";
-  import AgentsPanel from "./AgentsPanel.svelte";
   import { gotoBrowse } from "./routes";
   import type { AuthPrincipal } from "./api";
 
@@ -666,7 +665,21 @@
   {/if}
 
   {#if (isAdmin || authDisabled) && agentsEnabled}
-    <AgentsPanel />
+    <!-- W6-D4: agent config/management/status now lives on its own page. -->
+    <div class="mt-8 flex items-center gap-3 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
+      <div>
+        <h2 class="text-lg font-semibold">Agents (distributed fleet)</h2>
+        <p class="mt-1 text-xs text-slate-500">
+          Agent management moved to its own page — fleet status, enrollment,
+          installer sidecar, and config groups.
+        </p>
+      </div>
+      <div class="grow"></div>
+      <a href="#/agents"
+        class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white">
+        Agent management →
+      </a>
+    </div>
   {/if}
 
   <h2 class="mt-8 text-lg font-semibold">Recent scans</h2>

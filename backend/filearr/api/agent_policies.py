@@ -33,13 +33,13 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import audit
+from filearr import agent_config, audit
 from filearr import policy as policy_mod
 from filearr.api.agent_commands import _authenticate_agent
 from filearr.api.agents import require_agents_enabled
 from filearr.config import get_settings
 from filearr.db import get_session
-from filearr.models import Agent, PolicyVersion
+from filearr.models import Agent, AgentConfigGroup, PolicyVersion
 from filearr.security import require_scope
 
 router = APIRouter()
@@ -97,14 +97,25 @@ async def get_agent_policy(
     applied: int | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    """Serve ``agent``'s effective policy (agent>group>global; no merging).
+    """Serve ``agent``'s effective policy (agent>group>global; no merging), with
+    the agent's config group (W6-D2) merged in under a top-level ``group`` section.
 
-    ``200 {"scope","version","policy"}`` with ``ETag: "<scope>/<version>"``; a
-    matching ``If-None-Match`` → ``304`` (empty body, ETag still present). No
-    policy rows anywhere → ``200 {"scope":"none","version":0,"policy":{}}``
-    (``"none/0"``) — an agent must never 404 here. ``?applied=`` stamps the
-    reported-applied version + ``last_seen_at`` (the agent is demonstrably alive,
-    like the poll/replication endpoints)."""
+    ``200 {"scope","version","policy"}`` with ``ETag: "<scope>/<version>"`` (or
+    ``"<scope>/<version>/g:<tag>"`` when a config group is assigned — the group's
+    ``updated_at`` feeds ``<tag>`` so any group edit invalidates the agent's
+    cache); a matching ``If-None-Match`` → ``304`` (empty body, ETag still
+    present). No policy rows anywhere → ``200 {"scope":"none","version":0,
+    "policy":{}}`` (``"none/0"``) — an agent must never 404 here.
+
+    **Precedence** (most-specific wins): per-agent explicit policy keys (the
+    resolved ``agent`` > ``group[rollout_group]`` > ``global`` row) > config-group
+    settings > agent-side defaults. Config-group settings ride under ``group``;
+    a NULL config group adds no ``group`` section, and an operator-authored
+    top-level ``group`` policy key wins over the config group (never clobbered).
+    Additive: current binaries that ignore ``group`` are unaffected.
+
+    ``?applied=`` stamps the reported-applied version + ``last_seen_at`` (the agent
+    is demonstrably alive, like the poll/replication endpoints)."""
     agent = await _authenticate_agent(session, agent_id, request)
     now = datetime.now(UTC)
     agent.last_seen_at = now
@@ -113,7 +124,18 @@ async def get_agent_policy(
     await session.commit()
 
     scope, version, pol = await policy_mod.resolve_effective_policy(session, agent)
-    etag = f'"{scope}/{version}"'
+
+    # W6-D2: fold the agent's config group into the doc + ETag. NULL group → the
+    # ETag stays the pre-W6 "<scope>/<version>" form (backward compatible).
+    group = (
+        await session.get(AgentConfigGroup, agent.config_group_id)
+        if agent.config_group_id is not None
+        else None
+    )
+    pol = agent_config.merge_group_into_policy(pol, group)
+    group_tag = agent_config.group_etag_tag(group)
+    etag = f'"{scope}/{version}/g:{group_tag}"' if group_tag else f'"{scope}/{version}"'
+
     inm = request.headers.get("if-none-match")
     if inm and _etag_matches(inm, etag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})

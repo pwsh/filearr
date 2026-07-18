@@ -14,7 +14,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 # HEAD ASSERTION (P10-T6/T8): the staging dedup-index + activity-watermark
 # revision (d2f4b6a8c0e1) is the new head, chained on P10-T4's staging_transfers
 # (d1e5b9c3a7f2, now its predecessor).
-HEAD = "e4a7c2f1b9d6"
+HEAD = "c7d9e1f3a5b8"
 # P10-T6/T8 revision's predecessor (downgrade target that drops the updated_at
 # column + the active-item partial-unique index, leaving staging_transfers itself
 # intact).
@@ -100,6 +100,22 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         with engine.connect() as conn:
             rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         assert rev == HEAD
+        # W6-D3: agents.capabilities + the inventory command kind at head; a
+        # one-step downgrade to the W6-D2 revision drops the column and restores
+        # the narrower kind CHECK, leaving agents intact.
+        assert "capabilities" in _columns(engine, "agents")
+        command.downgrade(cfg, "f5c8a2b4d6e0")
+        assert "capabilities" not in _columns(engine, "agents")
+        assert "agents" in _tables(engine)
+        command.upgrade(cfg, "head")
+        # W6-D2: agent_config_groups + agents.config_group_id at head; a one-step
+        # downgrade to the P10-T11 revision drops both cleanly.
+        assert "agent_config_groups" in _tables(engine)
+        assert "config_group_id" in _columns(engine, "agents")
+        command.downgrade(cfg, "e4a7c2f1b9d6")
+        assert "agent_config_groups" not in _tables(engine)
+        assert "config_group_id" not in _columns(engine, "agents")
+        command.upgrade(cfg, "head")
         # P10-T11: items.share_hint present at head; a one-step downgrade to the
         # P10-T6/T8 staging revision drops it cleanly and leaves items intact.
         assert "share_hint" in _columns(engine, "items")
