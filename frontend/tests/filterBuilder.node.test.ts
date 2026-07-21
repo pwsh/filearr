@@ -1,8 +1,13 @@
 // Pure-codec tests for the visual filter builder (FIX-14).
 //
 // Runs on Node's built-in test runner with native TypeScript type-stripping
-// (Node >=22.18): `node --test frontend/tests/`. No bundler / DOM needed — this
+// (Node >=22.18): `npm test` from frontend/. No bundler / DOM needed — this
 // exercises the DOM-free rows<->DSL codec in ../src/lib/filterBuilder.ts.
+//
+// NB: a bare directory (`node --test tests/`) does NOT work — Node tries to
+// load the directory as a module. The npm script passes a QUOTED glob
+// (`node --test "tests/**/*.test.ts"`) which Node expands itself, so it behaves
+// the same under sh on CI and cmd on Windows.
 //
 // Focus: the codec is TOTAL and compiles the VALID SUBSET of rows —
 //   * incomplete rows (empty value/key) are excluded, never throw;

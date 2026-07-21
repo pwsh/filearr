@@ -14,7 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
-from filearr.models import Item, ItemStatus, Library, MediaType
+from filearr.models import Item, ItemStatus, Library
 from filearr.tasks.associate import associate_sidecars
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -49,7 +49,7 @@ async def session(pg_uri):
 async def _mk_item(session, lib, rel, mt, path, size=100):
     it = Item(
         library_id=lib.id,
-        media_type=mt,
+        file_category=mt,
         path=path,
         rel_path=rel,
         filename=rel.split("/")[-1],
@@ -73,15 +73,15 @@ async def test_nfo_and_thumb_link_and_metadata(session, tmp_path):
     (d / "Dune (2021).nfo").write_bytes(MOVIE_NFO)
 
     video = await _mk_item(
-        session, lib, "Dune (2021)/Dune (2021).mkv", MediaType.video,
+        session, lib, "Dune (2021)/Dune (2021).mkv", "video",
         str(d / "Dune (2021).mkv"), size=5_000_000,
     )
     nfo = await _mk_item(
-        session, lib, "Dune (2021)/Dune (2021).nfo", MediaType.other,
+        session, lib, "Dune (2021)/Dune (2021).nfo", "other",
         str(d / "Dune (2021).nfo"),
     )
     thumb = await _mk_item(
-        session, lib, "Dune (2021)/Dune (2021)-thumb.jpg", MediaType.image,
+        session, lib, "Dune (2021)/Dune (2021)-thumb.jpg", "image",
         str(d / "Dune (2021)-thumb.jpg"),
     )
     await session.commit()
@@ -118,8 +118,8 @@ async def test_rescan_idempotent(session, tmp_path):
     d = tmp_path / "X"
     d.mkdir()
     (d / "X.nfo").write_bytes(MOVIE_NFO)
-    video = await _mk_item(session, lib, "X/X.mkv", MediaType.video, str(d / "X.mkv"), size=9)
-    nfo = await _mk_item(session, lib, "X/X.nfo", MediaType.other, str(d / "X.nfo"))
+    video = await _mk_item(session, lib, "X/X.mkv", "video", str(d / "X.mkv"), size=9)
+    nfo = await _mk_item(session, lib, "X/X.nfo", "other", str(d / "X.nfo"))
     await session.commit()
 
     s1 = await associate_sidecars(session, lib.id)
@@ -142,9 +142,9 @@ async def test_directory_poster_links_to_primary(session, tmp_path):
     d = tmp_path / "Dir"
     d.mkdir()
     big = await _mk_item(
-        session, lib, "Dir/big.mkv", MediaType.video, str(d / "big.mkv"), size=10**9
+        session, lib, "Dir/big.mkv", "video", str(d / "big.mkv"), size=10**9
     )
-    poster = await _mk_item(session, lib, "Dir/poster.jpg", MediaType.image, str(d / "poster.jpg"))
+    poster = await _mk_item(session, lib, "Dir/poster.jpg", "image", str(d / "poster.jpg"))
     await session.commit()
 
     await associate_sidecars(session, lib.id)

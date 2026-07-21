@@ -38,6 +38,7 @@
   const FIELDS: { value: FieldKind; label: string }[] = [
     { value: "text", label: "Text" },
     { value: "kind", label: "Kind" },
+    { value: "group", label: "Group" },
     { value: "ext", label: "Extension" },
     { value: "size", label: "Size" },
     { value: "modified", label: "Modified" },
@@ -71,7 +72,7 @@
   ];
   const COMPARATOR_FIELDS = new Set<FieldKind>(["size", "modified", "created", "meta", "cf"]);
   const NEGATABLE = new Set<FieldKind>([
-    "text", "kind", "ext", "tag", "size", "modified", "created", "path", "hash", "meta", "cf",
+    "text", "kind", "group", "ext", "tag", "size", "modified", "created", "path", "hash", "meta", "cf",
   ]);
 
   let conditions = $state<Condition[]>([newCondition("kind")]);
@@ -133,11 +134,11 @@
     conditions = [...conditions];
   }
   function isNegated(c: Condition): boolean {
-    if (c.field === "kind" || c.field === "ext" || c.field === "tag") return c.op === "is_not";
+    if (c.field === "kind" || c.field === "group" || c.field === "ext" || c.field === "tag") return c.op === "is_not";
     return c.negated;
   }
   function setNegated(c: Condition, val: boolean) {
-    if (c.field === "kind" || c.field === "ext" || c.field === "tag") c.op = val ? "is_not" : "is";
+    if (c.field === "kind" || c.field === "group" || c.field === "ext" || c.field === "tag") c.op = val ? "is_not" : "is";
     else c.negated = val;
     conditions = [...conditions];
   }
@@ -279,6 +280,7 @@
   });
 
   const kindOptions = $derived(keys?.kinds ?? []);
+  const groupOptions = $derived(keys?.groups ?? []);
   const metaKeyOptions = $derived(keys?.meta_keys.map((k) => k.key) ?? []);
   const cfKeyOptions = $derived(keys?.custom_fields.map((k) => k.name) ?? []);
 </script>
@@ -361,6 +363,13 @@
                   bind:value={c.value}>
                   <option value="">choose…</option>
                   {#each kindOptions as k (k)}<option value={k}>{k}</option>{/each}
+                </select>
+              {:else if c.field === "group"}
+                <select
+                  class="rounded-lg border border-slate-300 bg-transparent px-2 py-1 text-sm dark:border-slate-700"
+                  bind:value={c.value}>
+                  <option value="">choose…</option>
+                  {#each groupOptions as g (g)}<option value={g}>{g}</option>{/each}
                 </select>
               {:else if c.field === "ext"}
                 <input
@@ -534,7 +543,7 @@
                 <tr class="border-t border-slate-100 dark:border-slate-800">
                   <td class="px-2 py-1 align-top" title={String(row.rel_path ?? "")}>{cell(row, "filename")}</td>
                   <td class="px-2 py-1 align-top">{cell(row, "library")}</td>
-                  <td class="px-2 py-1 align-top">{cell(row, "media_type")}</td>
+                  <td class="px-2 py-1 align-top">{cell(row, "file_category")}</td>
                   <td class="px-2 py-1 align-top tabular-nums">{cell(row, "size")}</td>
                   <td class="px-2 py-1 align-top text-right">
                     <button

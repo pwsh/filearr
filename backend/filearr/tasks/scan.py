@@ -6,33 +6,32 @@ quick-hash tier for move detection. Deletes are tombstoned, never hard-deleted.
 """
 
 import os
+import stat as stat_mod
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from pathspec import GitIgnoreSpec
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 
-from filearr import rbac
+from filearr import rbac, taxonomy
 from filearr.alerts import pipeline
 from filearr.alerts.rules import FileEvent
 from filearr.config import get_settings
 from filearr.db import SessionLocal
 from filearr.errors import sanitize_error
 from filearr.hashpolicy import resolve_hash_policy
-from filearr.media_types import detect
 from filearr.models import (
     AlertEvent,
     Item,
     ItemStatus,
     Library,
-    MediaType,
     ScanRun,
 )
 from filearr.presets import (
     build_library_spec,
     prune_dir,
-    resolve_enabled_extensions,
 )
 from filearr.sidecar import classify
 from filearr.tasks.associate import associate_sidecars
@@ -43,6 +42,70 @@ from filearr.worker import proc_app
 # scan's single end-of-walk defer of the whole library never runs as one
 # oversized defer transaction (the per-batch path passes <=250, one chunk).
 DEFER_CHUNK = 1000
+
+
+# Cap on the pruned-directory sample stored in ScanRun.stats. Enough to name the
+# culprits (.git / .venv / .vs) without letting a pathological tree bloat the blob.
+PRUNED_PATH_SAMPLE = 25
+
+
+@dataclass
+class WalkAudit:
+    """Why :func:`walk` did not emit files — the scan's self-accounting.
+
+    Every field except ``count_pruned`` is an OUTPUT the walk increments.
+
+    The reconciliation the UI and docs promise is::
+
+        seen + excluded + pruned_files == files on disk
+
+    ...but only when ``count_pruned`` is enabled. Pruned directories are skipped
+    *without being enumerated* (that is the entire point of pruning), so by
+    default the files inside them are counted NOWHERE and the identity above is
+    a lower bound. Live case (2026-07-19): a library reported 77,394 seen + 318
+    excluded against 99,694 files on disk — the missing 21,978 were all inside
+    dot-directories (``.git``/``.venv``) pruned by the default-on
+    ``hidden_dotfiles`` preset, and nothing in the UI could say so.
+
+    Enabling ``count_pruned`` (per-library ``count_pruned_files``) makes the walk
+    do a cheap second pass over each pruned subtree — ``scandir`` only, no
+    ``stat``, no spec matching, no ingestion — so the identity holds exactly. It
+    is opt-in because that pass costs real directory-listing time on a
+    network/rclone mount, which is precisely where big pruned trees live.
+    """
+
+    excluded_filtered: int = 0
+    pruned_dirs: int = 0
+    permission_denied: int = 0
+    pruned_files: int = 0
+    pruned_paths: list[str] = field(default_factory=list)
+    # INPUT: enumerate pruned subtrees just to count them (opt-in, see above).
+    count_pruned: bool = False
+
+
+def _count_tree_files(path: str) -> int:
+    """Count files under ``path`` as cheaply as possible.
+
+    ``scandir`` only: no ``stat`` (``is_dir`` rides the cached dirent type on
+    Linux), no gitignore matching, no sidecar classification, no ORM work. This
+    runs over trees we have deliberately chosen NOT to index, so it must stay far
+    cheaper than the real walk. Unreadable subdirectories are skipped rather than
+    raising — a partial count is better than failing the scan over a tree we are
+    not ingesting anyway."""
+    total = 0
+    stack = [path]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    if entry.is_dir(follow_symlinks=False):
+                        stack.append(entry.path)
+                    else:
+                        total += 1
+        except OSError:
+            continue
+    return total
 
 
 class ScanRootError(RuntimeError):
@@ -77,7 +140,13 @@ def assert_scannable_root(root: str) -> None:
         ) from exc
 
 
-def walk(root: str, spec: GitIgnoreSpec, start_rel: str = ""):
+def walk(
+    root: str,
+    spec: GitIgnoreSpec,
+    start_rel: str = "",
+    recursive: bool = True,
+    audit: "WalkAudit | None" = None,
+):
     """Parallel-friendly scandir walk. Yields (path, rel, size, mtime).
 
     Exclusion is driven by a single ``GitIgnoreSpec`` (P2-T1), replacing the old
@@ -103,7 +172,22 @@ def walk(root: str, spec: GitIgnoreSpec, start_rel: str = ""):
     (library identity is preserved) but only ``root/start_rel`` and below are
     visited. ``""`` (default) walks the whole library root, i.e. a full scan.
     The start directory itself is never prune-checked (an explicitly-configured
-    hot folder is always entered); pruning still applies to its descendants."""
+    hot folder is always entered); pruning still applies to its descendants.
+
+    ``recursive`` (W9): the default ``True`` descends the whole subtree (today's
+    behaviour, byte-for-byte). ``False`` walks only ``root/start_rel`` itself and
+    emits its DIRECT-CHILD files -- subdirectories are neither descended into nor
+    prune-evaluated -- so a targeted non-recursive scan touches exactly one
+    directory level. The exclusion spec + sidecar rules still apply to those
+    direct-child files; the emitted ``rel`` stays relative to ``root`` (identity
+    preserved, invariant 3).
+
+    ``audit`` (optional) is a caller-owned :class:`WalkAudit` this walk fills in
+    so a scan can report *why* files it did not emit were dropped — every
+    exclusion path here used to be silent, which made "the folder has 99k files
+    but the library shows 77k" impossible to explain. See :class:`WalkAudit` for
+    the reconciliation identity and the pruned-subtree caveat.
+    """
     stack = [start_rel]
     while stack:
         rel_dir = stack.pop()
@@ -113,16 +197,31 @@ def walk(root: str, spec: GitIgnoreSpec, start_rel: str = ""):
                 for entry in entries:
                     rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
                     if entry.is_dir(follow_symlinks=False):
-                        if not prune_dir(spec, rel, entry.path):
+                        # Non-recursive: never descend (and never prune-evaluate a
+                        # subdir we won't enter) -- direct-child files only.
+                        if recursive and not prune_dir(spec, rel, entry.path):
                             stack.append(rel)
+                        elif recursive and audit is not None:
+                            audit.pruned_dirs += 1
+                            if len(audit.pruned_paths) < PRUNED_PATH_SAMPLE:
+                                audit.pruned_paths.append(rel)
+                            # Opt-in: enumerate the skipped tree purely to count
+                            # it, so seen + excluded + pruned_files reconciles
+                            # with the on-disk total (WalkAudit).
+                            if audit.count_pruned:
+                                audit.pruned_files += _count_tree_files(entry.path)
                         continue
                     # File-level exclusion, R1-aware: an excluded file that a
                     # sidecar classifier claims is kept (its parent is indexed).
                     if spec.match_file(rel) and classify(rel) is None:
+                        if audit is not None:
+                            audit.excluded_filtered += 1
                         continue
                     stat = entry.stat(follow_symlinks=False)
                     yield entry.path, rel, stat.st_size, stat.st_mtime
         except PermissionError:
+            if audit is not None:
+                audit.permission_denied += 1
             continue
 
 
@@ -148,11 +247,71 @@ def _scope_dir_missing(root_path: str, scope: str) -> bool:
     return bool(scope) and not os.path.isdir(os.path.join(root_path, scope))
 
 
+def _scope_fs_kind(root_path: str, scope: str) -> str:
+    """Classify a non-empty scan ``scope`` under ``root_path`` from the filesystem
+    as ``'file'`` / ``'dir'`` / ``'absent'`` (W9). Sync helper (keeps ``os.path``
+    off the async scan body, ASYNC240)."""
+    p = os.path.join(root_path, scope)
+    if os.path.isfile(p):
+        return "file"
+    if os.path.isdir(p):
+        return "dir"
+    return "absent"
+
+
+def _walk_one_file(root: str, rel: str, spec: GitIgnoreSpec):
+    """Yield exactly the single regular file at ``root/rel`` (a W9 file-scoped
+    scan), applying the SAME spec + sidecar rule the directory walk applies per
+    file. Yields nothing if the file vanished between scope resolution and here,
+    is not a regular file, or the spec excludes it and no sidecar classifier
+    claims it. ``rel`` is kept relative to ``root`` (identity preserved)."""
+    path = os.path.join(root, rel)
+    try:
+        st = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return
+    if not stat_mod.S_ISREG(st.st_mode):
+        return
+    if spec.match_file(rel) and classify(rel) is None:
+        return
+    yield path, rel, st.st_size, st.st_mtime
+
+
+def _in_scanned_set(rel: str, scope: str, *, is_file: bool, recursive: bool) -> bool:
+    """Whether library-relative ``rel`` is in the EXACT set a scoped scan walked
+    -- i.e. the tombstone/move blast radius (W9). This is the invariant that a
+    scoped scan may only ever mark ``missing`` items it actually confirmed gone:
+
+      * a **single-file** scope covers only its one path;
+      * a **non-recursive dir** scope covers only that dir's DIRECT-child files
+        (never a descendant one level deeper);
+      * a **recursive dir** scope (or a full scan, ``scope == ""``) covers the
+        whole subtree -- today's :func:`_under_scope` behaviour.
+
+    Nothing OUTSIDE the scanned set is ever in-scope, so a sibling / parent /
+    out-of-scope descendant is never touched."""
+    if is_file:
+        return rel == scope
+    if recursive:
+        return _under_scope(rel, scope)
+    # non-recursive directory scope: direct-child files only (no descendants).
+    if scope == "":
+        return "/" not in rel
+    if not rel.startswith(scope + "/"):
+        return False
+    return "/" not in rel[len(scope) + 1:]
+
+
 @proc_app.task(queue="scan", name="filearr.tasks.scan.scan_library")
-async def scan_library(library_id: str, rel_path: str | None = None) -> dict:
+async def scan_library(
+    library_id: str, rel_path: str | None = None, recursive: bool = True
+) -> dict:
     """Scan a library. ``rel_path`` (P2-T6) confines the walk/diff to a subtree
-    (a ``scan_paths`` hot folder); ``None`` (default) is a full-library scan and
-    is byte-for-byte the T5 behaviour."""
+    (a ``scan_paths`` hot folder) OR, for a W9 targeted scan, a single file;
+    ``None`` (default) is a full-library scan and is byte-for-byte the T5
+    behaviour. ``recursive`` (W9, additive/defaulted for back-compat with queued
+    jobs) is honoured only when the scope resolves to a directory: ``False`` scans
+    just that directory's direct-child files and tombstones only among them."""
     scope = _norm_scope(rel_path)
     async with SessionLocal() as session:
         library = (
@@ -169,7 +328,9 @@ async def scan_library(library_id: str, rel_path: str | None = None) -> dict:
         await session.commit()
 
         try:
-            return await _scan_body(session, library, run, scope_rel=rel_path)
+            return await _scan_body(
+                session, library, run, scope_rel=rel_path, recursive=recursive
+            )
         except Exception as exc:
             # a crashed scan must never stay 'running' forever
             await session.rollback()
@@ -194,11 +355,14 @@ async def scan_library(library_id: str, rel_path: str | None = None) -> dict:
             raise
 
 
-async def _scan_body(session, library, run, scope_rel: str | None = None) -> dict:
+async def _scan_body(
+    session, library, run, scope_rel: str | None = None, recursive: bool = True
+) -> dict:
     # scope == "" => whole library (a full scan, byte-for-byte T5). A non-empty
-    # scope confines the WALK and all WRITES/tombstones to that subtree while the
-    # `existing` diff map below stays whole-library (read-only), so move detection
-    # and sidecar association keep full-library context (ruling R3).
+    # scope confines the WALK and all WRITES/tombstones to that subtree (or, W9, a
+    # single file) while the `existing` diff map below stays whole-library (read-
+    # only), so move detection and sidecar association keep full-library context
+    # (ruling R3). ``recursive`` (W9) applies only to a directory scope.
     scope = _norm_scope(scope_rel)
     if True:  # preserve original indentation block
 
@@ -210,19 +374,47 @@ async def _scan_body(session, library, run, scope_rel: str | None = None) -> dic
         # abort path leaves the run row clean.
         assert_scannable_root(library.root_path)
 
-        # Scoped scan of a subtree that does not exist (yet): a scan_paths row may
-        # be pre-created before its folder exists, and a temporarily-absent hot
-        # folder must NOT tombstone the items recorded under it (integrity >
-        # freshness; the library root passed the dead-mount check above, so this
-        # is a genuinely-missing subdir, not a dead mount). Finish clean, writing
-        # nothing. A full scan (scope == "") never takes this path.
-        if _scope_dir_missing(library.root_path, scope):
-            run.status = "finished"
-            run.finished_at = datetime.now(UTC)
-            run.stats = {**(run.stats or {}), "scope": scope, "scope_missing": True,
-                         "seen": 0}
-            await session.commit()
-            return run.stats
+        # W9: classify the scope as the whole library / a single FILE / a directory
+        # subtree, FROM THE FILESYSTEM. This decides both the walk shape and the
+        # tombstone blast radius (`_in_scanned_set`). `recursive` only matters for a
+        # directory scope.
+        if scope == "":
+            scope_is_file = False
+        else:
+            fs_kind = _scope_fs_kind(library.root_path, scope)
+            if fs_kind == "file":
+                scope_is_file = True
+            elif fs_kind == "dir":
+                scope_is_file = False
+            else:
+                # The scope path is ABSENT on disk at scan time. Disambiguate via
+                # the catalog: an item recorded at EXACTLY this rel_path means the
+                # scope was a single file that vanished between enqueue and scan ->
+                # fall through so that one item is tombstoned (W9: a file scope
+                # tombstones at most its one file). Otherwise this is a vanished /
+                # never-existed DIRECTORY subtree (a pre-created or temporarily-
+                # absent hot folder): it must NOT mass-tombstone the items recorded
+                # under it (integrity > freshness; the root passed the dead-mount
+                # check above, so this is a genuinely-missing subdir, not a dead
+                # mount) -- finish clean, writing nothing. A full scan never lands
+                # here (scope == "").
+                exact = (
+                    await session.execute(
+                        select(Item.id)
+                        .where(Item.library_id == library.id, Item.rel_path == scope)
+                        .limit(1)
+                    )
+                ).first()
+                if exact is not None:
+                    scope_is_file = True
+                else:
+                    run.status = "finished"
+                    run.finished_at = datetime.now(UTC)
+                    run.stats = {**(run.stats or {}), "scope": scope,
+                                 "scope_missing": True, "seen": 0,
+                                 "recursive": recursive}
+                    await session.commit()
+                    return run.stats
 
         # Resolve the T7 hash policy ONCE for this run (the 'auto' network probe is
         # a mountinfo parse we do not want to repeat per file) and record it in
@@ -245,17 +437,28 @@ async def _scan_body(session, library, run, scope_rel: str | None = None) -> dic
 
         seen: set[str] = set()
         new = changed = 0
-        enabled = set(library.enabled_types or [])
-        # P2-T3: per-MediaType extension-group refinement (ruling R5, union
-        # semantics). Resolved ONCE per scan into a MediaType -> allowed-set map;
-        # a value of None means "no group refines this type" (all extensions in
-        # the bucket allowed -- today's behaviour). Sidecars bypass this gate.
-        enabled_types_list = list(library.enabled_types or [])
-        enabled_groups = list(library.enabled_extension_groups or [])
-        ext_allow = {
-            mt: resolve_enabled_extensions(mt, enabled_types_list, enabled_groups)
-            for mt in MediaType
-        }
+        # Total bytes of every file admitted by the gate this run (the on-disk
+        # footprint the scan actually walked, NOT a delta). Accumulated here
+        # rather than derived later because `Item` has no scan_run_id, so any
+        # after-the-fact SUM(size) would have to guess via last_seen and would be
+        # contaminated by concurrent scoped scans and the extract worker.
+        bytes_seen = 0
+        # Why files were NOT ingested. `excluded_gate` is counted here (the
+        # taxonomy category/group gate below); the walk fills the rest. Together
+        # with `seen` these explain the gap between "files on disk" and "items in
+        # the library", which was previously invisible. count_pruned_files is the
+        # per-library opt-in that makes the accounting reconcile exactly (it
+        # costs an extra directory-listing pass over the pruned trees).
+        audit = WalkAudit(count_pruned=bool(library.count_pruned_files))
+        excluded_gate = 0
+        # W8-B taxonomy gating (replaces the MediaType-keyed enabled_types + the
+        # P2-T3 per-type extension-group refinement). A file is INCLUDED iff its
+        # file_group is in enabled_groups OR its file_category is in
+        # enabled_categories (a selected category admits all its groups). BOTH empty
+        # => include everything. Sidecars bypass the gate entirely.
+        enabled_categories = set(library.enabled_categories or [])
+        enabled_groups = set(library.enabled_groups or [])
+        gate_active = bool(enabled_categories or enabled_groups)
         FLUSH_EVERY = 250  # commit + publish progress in batches, not one giant txn
         # UI-T14 staged pipeline: when on, extraction is NOT deferred per batch
         # during the walk -- ``pending_extract`` accumulates every new/changed id
@@ -310,6 +513,13 @@ async def _scan_body(session, library, run, scope_rel: str | None = None) -> dic
                 "seen": len(seen),
                 "new": new,
                 "changed": changed,
+                # Live total size walked so far. The dashboard divides `seen` by
+                # elapsed for files/min; this is the matching size figure.
+                "bytes_seen": bytes_seen,
+                # Live exclusion tally so a scan in progress already shows why
+                # files are being skipped (see the terminal blob for the split).
+                "excluded": excluded_gate + audit.excluded_filtered,
+                "pruned_files": audit.pruned_files,
             }
             if alert_rules and alert_drafts:
                 try:
@@ -336,32 +546,50 @@ async def _scan_body(session, library, run, scope_rel: str | None = None) -> dic
         # cleanly and runs a RESTRICTED wrap-up instead of aborting.
         stop_requested = False
         walk_started = time.monotonic()
-        for path, rel, size, mtime_ts in walk(library.root_path, spec, start_rel=scope):
-            media_type = detect(path)
+        # W8-B: load the (cached) taxonomy snapshot ONCE per scan; classifying each
+        # file into (file_category, file_group) is then pure dict lookups (no
+        # per-file DB I/O), and the same classification drives both the inclusion
+        # gate and the stored columns.
+        tax = await taxonomy.load(session)
+        # W9: a file scope walks exactly its one file; a directory scope (or full
+        # scan) walks the subtree, honouring `recursive`.
+        if scope_is_file:
+            scan_entries = _walk_one_file(library.root_path, scope, spec)
+        else:
+            scan_entries = walk(
+                library.root_path,
+                spec,
+                start_rel=scope,
+                recursive=recursive,
+                audit=audit,
+            )
+        for path, rel, size, mtime_ts in scan_entries:
             # Sidecars (.nfo / poster.jpg / -thumb / *_JRSidecar.xml, ...) are always
-            # ingested regardless of enabled_types: they are bookkeeping rows that get
+            # ingested regardless of the gate: they are bookkeeping rows that get
             # linked to a parent and hidden from default search. Skipping them here
             # would let an episode's .nfo/thumb reappear as stray top-level hits.
             is_sidecar = classify(rel) is not None
-            if enabled and not is_sidecar and media_type.value not in enabled:
-                continue  # user excluded this media type for this library
-            # P2-T3: extension-group refinement within an enabled type (R5
-            # union). A non-None allow-set narrows the type to that union; a
-            # file whose extension is not in it is skipped. Sidecars bypass
-            # (bookkeeping rows are always ingested, like the enabled_types gate).
-            if not is_sidecar:
-                allowed_exts = ext_allow[media_type]
-                if allowed_exts is not None and (
-                    os.path.splitext(path)[1].lstrip(".").lower() not in allowed_exts
-                ):
-                    continue
+            file_category, file_group = tax.detect(path)
+            # W8-B inclusion gate: a file is kept iff nothing is selected (BOTH
+            # empty) OR its category is enabled OR its group is enabled (selecting a
+            # category admits all its groups). Sidecars bypass the gate.
+            if gate_active and not is_sidecar and (
+                file_category not in enabled_categories
+                and file_group not in enabled_groups
+            ):
+                excluded_gate += 1
+                continue  # user excluded this category/group for this library
             seen.add(rel)
+            bytes_seen += size
             mtime = datetime.fromtimestamp(mtime_ts, tz=UTC)
             item = existing.get(rel)
             if item is None:
                 item = Item(
                     library_id=library.id,
-                    media_type=media_type,
+                    # W8-B: stored (category, group) from the DB-backed taxonomy —
+                    # the authoritative classification (media_type is gone).
+                    file_category=file_category,
+                    file_group=file_group,
                     path=path,
                     rel_path=rel,
                     filename=os.path.basename(path),
@@ -437,7 +665,7 @@ async def _scan_body(session, library, run, scope_rel: str | None = None) -> dic
         candidates = [] if stop_requested else [
             item
             for rel, item in existing.items()
-            if _under_scope(rel, scope)
+            if _in_scanned_set(rel, scope, is_file=scope_is_file, recursive=recursive)
             and rel not in seen
             and item.status == ItemStatus.active
             and item.quick_hash is not None
@@ -508,7 +736,7 @@ async def _scan_body(session, library, run, scope_rel: str | None = None) -> dic
         if not stop_requested:
             for rel, item in existing.items():
                 if (
-                    _under_scope(rel, scope)
+                    _in_scanned_set(rel, scope, is_file=scope_is_file, recursive=recursive)
                     and rel not in seen
                     and item.rel_path not in seen
                     and item.status == ItemStatus.active
@@ -531,9 +759,37 @@ async def _scan_body(session, library, run, scope_rel: str | None = None) -> dic
             "hash_policy": resolved_policy.as_stats(),
             # P2-T6 scope: the subtree this run scanned ("" = full library).
             "scope": scope,
+            # W9: the scope kind + recursion mode this run applied.
+            "scope_is_file": scope_is_file,
+            "recursive": recursive,
             "seen": len(seen),
             "files_per_s": round(len(seen) / walk_elapsed, 1),
             "walk_seconds": round(walk_elapsed, 2),
+            # Total on-disk size walked, plus its throughput. Same clock and same
+            # exclusions as files_per_s, so the two are directly comparable.
+            "bytes_seen": bytes_seen,
+            "bytes_per_s": round(bytes_seen / walk_elapsed),
+            # --- why files were not ingested ----------------------------------
+            # `excluded` = files the walk SAW and dropped, so
+            # `seen + excluded + pruned_files` = files on disk. `pruned_files` is
+            # only populated when the library opts into count_pruned_files;
+            # otherwise pruned subtrees are never enumerated and the identity is
+            # a LOWER BOUND — the usual reason an OS folder count is higher.
+            "excluded": excluded_gate + audit.excluded_filtered,
+            # Excluded because the library's category/group selection did not
+            # admit the file (empty selection = admit everything, so 0 here).
+            "excluded_gate": excluded_gate,
+            # Excluded by the exclusion spec: presets, exclude_globs, dotfiles.
+            "excluded_filtered": audit.excluded_filtered,
+            "pruned_dirs": audit.pruned_dirs,
+            # A SAMPLE (capped) of pruned directories, so the UI can name the
+            # culprits (.git / .venv) instead of reporting a bare count.
+            "pruned_paths": audit.pruned_paths,
+            # Files inside pruned subtrees. 0 AND unreliable unless
+            # count_pruned_files is on — `pruned_counted` says which.
+            "pruned_files": audit.pruned_files,
+            "pruned_counted": audit.count_pruned,
+            "permission_denied": audit.permission_denied,
             # `moved` rows were counted as `new` during the walk (they were freshly
             # inserted before we recognised them as relocations); reclassify them.
             "new": new - move_stats["moved"],

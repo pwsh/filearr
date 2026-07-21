@@ -60,7 +60,7 @@ async def session(engine):
 
 async def _mk_library(session, root, **kw):
     lib = Library(name=kw.pop("name", "lib"), root_path=str(root),
-                  enabled_types=kw.pop("enabled_types", []), **kw)
+                  enabled_categories=kw.pop("enabled_categories", []), **kw)
     session.add(lib)
     await session.commit()
     return lib
@@ -113,7 +113,7 @@ async def test_stop_mid_walk_keeps_progress(session, tmp_path, monkeypatch):
 
     root = tmp_path / "lib"
     _touch(root, 600, "jpg")
-    lib = await _mk_library(session, root, name="stop", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="stop", enabled_categories=["image"])
 
     deferred: list[str] = []
     _stub_extract_reindex(monkeypatch, scan_mod, deferred)
@@ -156,7 +156,7 @@ async def test_stop_does_not_tombstone_unvisited(session, tmp_path, monkeypatch)
 
     root = tmp_path / "lib"
     _touch(root, 400, "jpg")
-    lib = await _mk_library(session, root, name="notomb", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="notomb", enabled_categories=["image"])
     _stub_extract_reindex(monkeypatch, scan_mod)
 
     # Full first scan -> 400 active items, all present on disk.
@@ -198,7 +198,7 @@ async def test_stop_preserves_sidecar_links(session, tmp_path, monkeypatch):
     (root / "film.mkv").write_bytes(b"video-bytes")
     (root / "film.nfo").write_bytes(b"<movie><title>M</title></movie>")
     lib = await _mk_library(session, root, name="side",
-                            enabled_types=["image", "video"])
+                            enabled_categories=["image", "video"])
     _stub_extract_reindex(monkeypatch, scan_mod)
 
     # Full scan links film.nfo -> film.mkv.
@@ -240,7 +240,7 @@ async def test_scoped_scan_stop(session, tmp_path, monkeypatch):
 
     root = tmp_path / "lib"
     _touch(root / "Downloads", 300, "jpg")
-    lib = await _mk_library(session, root, name="scoped", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="scoped", enabled_categories=["image"])
     _stub_extract_reindex(monkeypatch, scan_mod)
 
     # Full scoped scan of Downloads -> 300 active items under the subtree.

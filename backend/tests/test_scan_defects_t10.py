@@ -61,7 +61,7 @@ async def session(engine):
 
 async def _mk_library(session, root, **kw):
     lib = Library(name=kw.pop("name", "lib"), root_path=str(root),
-                  enabled_types=kw.pop("enabled_types", []), **kw)
+                  enabled_categories=kw.pop("enabled_categories", []), **kw)
     session.add(lib)
     await session.commit()
     return lib
@@ -84,7 +84,7 @@ async def test_batched_commits_and_progress_over_250(session, tmp_path, monkeypa
 
     root = tmp_path / "lib"
     _touch(root, 600, "jpg")
-    lib = await _mk_library(session, root, name="batched", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="batched", enabled_categories=["image"])
 
     async def _noop_defer(item_ids, scan_run_id=None):
         return None
@@ -141,7 +141,7 @@ async def test_progress_published_mid_scan(session, tmp_path, monkeypatch):
 
     root = tmp_path / "lib"
     _touch(root, 550, "jpg")
-    lib = await _mk_library(session, root, name="progress", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="progress", enabled_categories=["image"])
 
     async def _noop_defer(item_ids, scan_run_id=None):
         return None
@@ -189,7 +189,7 @@ async def test_crash_marks_failed_never_running(session, tmp_path, monkeypatch):
 
     root = tmp_path / "lib"
     _touch(root, 3, "jpg")
-    lib = await _mk_library(session, root, name="crash", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="crash", enabled_categories=["image"])
 
     boom = RuntimeError("disk on fire \x07\x1b[31mANSI")
 
@@ -324,7 +324,7 @@ async def test_between_batch_abort_stops_scan(session, tmp_path, monkeypatch):
 
     root = tmp_path / "lib"
     _touch(root, 600, "jpg")
-    lib = await _mk_library(session, root, name="abort", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="abort", enabled_categories=["image"])
 
     async def _noop_defer(item_ids, scan_run_id=None):
         return None
@@ -375,7 +375,7 @@ async def test_extract_deferred_only_after_commit(session, tmp_path, monkeypatch
 
     root = tmp_path / "lib"
     _touch(root, 300, "jpg")  # >250 so at least one batch defer happens mid-scan
-    lib = await _mk_library(session, root, name="order", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="order", enabled_categories=["image"])
 
     events: list[str] = []
 
@@ -427,7 +427,7 @@ async def test_self_heal_requeues_null_quick_hash(session, tmp_path, monkeypatch
 
     root = tmp_path / "lib"
     _touch(root, 1, "jpg")
-    lib = await _mk_library(session, root, name="heal", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="heal", enabled_categories=["image"])
 
     deferred: list[list[str]] = []
 
@@ -472,7 +472,7 @@ async def test_self_heal_skips_already_hashed(session, tmp_path, monkeypatch):
 
     root = tmp_path / "lib"
     _touch(root, 1, "jpg")
-    lib = await _mk_library(session, root, name="nohealed", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="nohealed", enabled_categories=["image"])
 
     deferred: list[str] = []
 
@@ -517,7 +517,7 @@ async def test_missing_root_aborts_before_diff(session, tmp_path, monkeypatch):
 
     root = tmp_path / "lib"
     _touch(root, 3, "jpg")
-    lib = await _mk_library(session, root, name="deadmount", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="deadmount", enabled_categories=["image"])
 
     async def _noop_defer(item_ids, scan_run_id=None):
         return None
@@ -584,7 +584,7 @@ async def test_unreadable_root_does_not_tombstone(session, tmp_path, monkeypatch
 
     root = tmp_path / "lib"
     _touch(root, 2, "jpg")
-    lib = await _mk_library(session, root, name="unreadable", enabled_types=["image"])
+    lib = await _mk_library(session, root, name="unreadable", enabled_categories=["image"])
 
     async def _noop_defer(item_ids, scan_run_id=None):
         return None

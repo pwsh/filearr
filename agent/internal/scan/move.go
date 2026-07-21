@@ -180,7 +180,8 @@ func detectMoves(ctx context.Context, tx *sql.Tx, libraryRef string, candidates,
 		s.Extension = d.Extension
 		s.Size = d.Size
 		s.MtimeNs = d.MtimeNs
-		s.MediaType = d.MediaType
+		s.FileCategory = d.FileCategory
+		s.FileGroup = d.FileGroup
 		s.Status = d.Status
 		s.LastSeen = now
 		s.QuickHash = d.QuickHash

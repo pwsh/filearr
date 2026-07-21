@@ -121,3 +121,12 @@ def test_facet_candidates_are_filterable_and_facet_enabled():
     for cand in FACET_SEARCH_CANDIDATES:
         assert cand in FILTERABLE_ATTRIBUTES
         assert cand not in FACET_SEARCH_DISABLED
+
+
+def test_file_category_taxonomy_facet_wired():
+    # W8-A: the coarse file_category parent is filterable AND a facet-search
+    # candidate (low-cardinality controlled vocab), exactly like media_type /
+    # file_group, and never facet-search-disabled.
+    assert "file_category" in FILTERABLE_ATTRIBUTES
+    assert "file_category" in FACET_SEARCH_CANDIDATES
+    assert "file_category" not in FACET_SEARCH_DISABLED

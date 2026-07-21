@@ -51,7 +51,7 @@ func seedIndex(t *testing.T, now time.Time) string {
 		it := &index.Item{
 			ID: id, RootID: rid, RelPath: r.rel, Filename: filepath.Base(r.rel),
 			Extension: r.ext, Size: r.size, MtimeNs: ts.UnixNano(),
-			QuickHash: r.qhash, MediaType: r.media,
+			QuickHash: r.qhash, FileCategory: r.media,
 			Status: index.StatusActive, IsSidecar: r.sidecar, FirstSeen: ts, LastSeen: ts,
 		}
 		if err := index.InsertItem(ctx, tx, it); err != nil {

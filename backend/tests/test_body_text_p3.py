@@ -116,7 +116,7 @@ def test_index_cap_in_build_doc(monkeypatch):
 
     from filearr import search as search_mod
     from filearr.config import get_settings
-    from filearr.models import Item, ItemStatus, MediaType
+    from filearr.models import Item, ItemStatus
 
     get_settings.cache_clear()
     monkeypatch.setattr(get_settings(), "body_text_index_chars", 50)
@@ -124,7 +124,7 @@ def test_index_cap_in_build_doc(monkeypatch):
     item = Item(
         id=uuid.uuid4(),
         library_id=uuid.uuid4(),
-        media_type=MediaType.document,
+        file_category="document", file_group="document-text",
         path="/data/d.pdf",
         rel_path="d.pdf",
         filename="d.pdf",
@@ -147,12 +147,12 @@ def test_build_doc_omits_empty_body_text():
     from datetime import UTC, datetime
 
     from filearr import search as search_mod
-    from filearr.models import Item, ItemStatus, MediaType
+    from filearr.models import Item, ItemStatus
 
     item = Item(
         id=uuid.uuid4(),
         library_id=uuid.uuid4(),
-        media_type=MediaType.video,
+        file_category="video", file_group="video",
         path="/data/a.mkv",
         rel_path="a.mkv",
         filename="a.mkv",

@@ -70,7 +70,7 @@ async def db(pg, monkeypatch):
 
 
 async def _mk_item(Session, *, metadata=None):
-    from filearr.models import Item, Library, MediaType
+    from filearr.models import Item, Library
 
     async with Session() as s:
         lib = Library(name=f"lib-{datetime.now(UTC).timestamp()}", root_path="/root")
@@ -78,7 +78,7 @@ async def _mk_item(Session, *, metadata=None):
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             status="active",
             path="/root/movie.mkv",  # does not exist -> hashing OSError swallowed
             rel_path="movie.mkv",
@@ -96,7 +96,7 @@ async def _mk_item(Session, *, metadata=None):
 def _set_extractor(monkeypatch, fn):
     import filearr.tasks.extract as extract_mod
 
-    monkeypatch.setitem(extract_mod.EXTRACTORS, extract_mod.MediaType.video, fn)
+    monkeypatch.setitem(extract_mod.EXTRACTOR_BY_KIND, "video", fn)
 
 
 async def _meta(Session, item_id):

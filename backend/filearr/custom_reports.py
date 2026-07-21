@@ -29,7 +29,7 @@ from sqlalchemy import Select, select
 
 from filearr import share_map
 from filearr.custom_fields import CustomFieldDef
-from filearr.models import Item, ItemStatus, Library, MediaType
+from filearr.models import Item, ItemStatus, Library
 from filearr.query_sql import ast_to_where
 from filearr.querydsl import CF_PREFIX, MAX_DYNAMIC_KEY_LEN, META_PREFIX
 from filearr.querydsl import parse as parse_query
@@ -53,9 +53,10 @@ _CORE_SERIALIZE: dict[str, Callable[[Item], Any]] = {
     "extension": lambda it: it.extension,
     "size": lambda it: int(it.size) if it.size is not None else None,
     "mtime": lambda it: _iso(it.mtime),
-    "media_type": lambda it: it.media_type.value
-    if isinstance(it.media_type, MediaType)
-    else str(it.media_type),
+    # W8-B: media_type is gone; the taxonomy file_category/file_group are the
+    # authoritative type columns.
+    "file_category": lambda it: it.file_category,
+    "file_group": lambda it: it.file_group,
     "status": lambda it: it.status.value
     if isinstance(it.status, ItemStatus)
     else str(it.status),
@@ -76,7 +77,8 @@ _CORE_SORT_COLUMN = {
     "extension": Item.extension,
     "size": Item.size,
     "mtime": Item.mtime,
-    "media_type": Item.media_type,
+    "file_category": Item.file_category,
+    "file_group": Item.file_group,
     "status": Item.status,
     "title": Item.title,
     "year": Item.year,

@@ -225,7 +225,7 @@ async def test_scan_500_files_batch_defers_and_records_throughput(proc_connector
 
     try:
         async with Session() as session:
-            lib = Library(name="smoke", root_path=str(root), enabled_types=["image"])
+            lib = Library(name="smoke", root_path=str(root), enabled_categories=["image"])
             session.add(lib)
             await session.commit()
             run = ScanRun(library_id=lib.id, stats={})

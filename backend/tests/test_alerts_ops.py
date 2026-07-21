@@ -28,7 +28,6 @@ from filearr.models import (
     Item,
     ItemStatus,
     Library,
-    MediaType,
 )
 from filearr.models import AlertRule as RuleRow
 
@@ -62,7 +61,7 @@ async def maker(pg_uri):
 
 async def _mk_library(maker, name="lib", root="/nonexistent-root-xyz"):
     async with maker() as s:
-        lib = Library(name=name, root_path=root, enabled_types=[])
+        lib = Library(name=name, root_path=root, enabled_categories=[])
         s.add(lib)
         await s.commit()
         await s.refresh(lib)
@@ -105,7 +104,7 @@ async def _add_error_items(maker, lib, n):
             s.add(
                 Item(
                     library_id=lib.id,
-                    media_type=MediaType.video,
+                    file_category="video", file_group="video",
                     status=ItemStatus.active,
                     path=f"/x/{uuid4().hex}",
                     rel_path=f"bad/{uuid4().hex}.mp4",

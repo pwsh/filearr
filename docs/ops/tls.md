@@ -63,6 +63,37 @@ is the coexistence mechanism (HTTP app == default fallback); it is exercised by
 passthrough now lives *inside* the CT, so no upstream nginx `stream {}` block is
 needed.
 
+### HTTP/3 is pinned OFF — and must stay off
+
+Both Caddyfiles set `protocols h1 h2`. Two independent reasons:
+
+1. **Every 443/8443 mapping we publish is TCP-only** (Docker's default without a
+   `/udp` suffix). Caddy's default protocol set is `h1 h2 h3`, which advertises
+   `Alt-Svc: h3=":443"` on a port where UDP was never forwarded. Browsers that
+   honour the advertisement attempt QUIC and **stall on a site that is otherwise
+   perfectly healthy** — the server looks down while `curl` against it returns
+   `HTTP/2 200`. This bit a live deployment on 2026-07-19; the symptom vanished
+   only when QUIC was disabled in the browser.
+2. **QUIC would bypass the `ca.<domain>` passthrough.** The `layer4` listener
+   wrapper above peeks the ClientHello on the **TCP** listener only. A QUIC client
+   reaching `ca.<domain>` would skip the raw proxy entirely and hit the HTTP app,
+   breaking agent CA renewal (agents.md §7.4).
+
+So publishing UDP/443 is **not** a valid fix for (1) — it trades a stall for a
+broken agent CA plane. If HTTP/3 is ever wanted, (2) must be solved first (e.g. a
+QUIC-aware SNI split, or moving step-ca off the shared 443).
+
+Diagnostic: a correct deployment returns **no** `alt-svc` header.
+
+```bash
+curl -sI --resolve filearr.<domain>:443:127.0.0.1 \
+  https://filearr.<domain>/api/v1/health | grep -i alt-svc   # expect no output
+```
+
+Note that browsers cache `Alt-Svc` (ours advertised `ma=2592000`, 30 days), so
+after fixing this you must clear browsing data or use a fresh profile — a stale
+cache keeps retrying QUIC and masks the fix.
+
 ### Agent-plane mTLS
 
 The `agents.<domain>` site enforces `client_auth { mode require_and_verify;

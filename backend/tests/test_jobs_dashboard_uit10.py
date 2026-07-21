@@ -126,7 +126,7 @@ async def test_running_jobs_resolves_rel_path(proc_connector):
     import psycopg
 
     from filearr.jobs_stats import running_jobs
-    from filearr.models import Item, Library, MediaType
+    from filearr.models import Item, Library
 
     engine, Session = _session_maker(proc_connector)
     item_id = None
@@ -135,7 +135,7 @@ async def test_running_jobs_resolves_rel_path(proc_connector):
         session.add(lib)
         await session.commit()
         it = Item(
-            library_id=lib.id, media_type=MediaType.video, path="/data/a.mkv",
+            library_id=lib.id, file_category="video", file_group="video", path="/data/a.mkv",
             rel_path="movies/a.mkv", filename="a.mkv", size=1,
             mtime=datetime.now(UTC),
         )
@@ -250,8 +250,11 @@ async def test_jobs_summary_composition(proc_connector, monkeypatch):
     assert set(summary) == {
         "queues", "extract", "running", "failed_recent", "meili", "scans_running",
         "stalled", "priorities", "staged_pipeline", "disk", "resources", "thumbs",
-        "upcoming",
+        "scan_throughput", "upcoming",
     }
+    # The running scan carries started_at so the dashboard can derive files/min
+    # between polls (the SSE endpoint is not the only source of a rate).
+    assert summary["scans_running"][0]["started_at"] is not None
     # resources always carries the cpu tile plus the io/net/db keys (each may be
     # null on a non-Linux host / failed DB probe, but the keys are always present).
     assert {"cpu", "io", "net", "db"} <= set(summary["resources"])
@@ -294,6 +297,62 @@ async def test_jobs_summary_composition(proc_connector, monkeypatch):
     assert scan["library_name"] == "films"
     assert scan["stats"]["seen"] == 42
     assert scan["rel_path"] is None
+    # No FINISHED runs were seeded -> zeros, never a divide-by-zero.
+    assert summary["scan_throughput"]["runs"] == 0
+    assert summary["scan_throughput"]["files_per_min"] == 0.0
+
+
+async def test_scan_throughput_is_weighted_and_skips_untimed_runs(proc_connector):
+    """Aggregate walk rate = SUM(seen)/SUM(walk_seconds), NOT AVG(files_per_s).
+
+    The distinction matters: a tiny scoped rescan finishing fast has a huge
+    files_per_s, and averaging the per-run rates would let it dominate a long
+    full scan. Only ``finished`` runs with a positive ``walk_seconds`` count.
+    """
+    from filearr.jobs_stats import scan_throughput
+    from filearr.models import Library, ScanRun
+
+    engine, Session = _session_maker(proc_connector)
+    async with Session() as session:
+        lib = Library(name="films", root_path="/data/films")
+        session.add(lib)
+        await session.commit()
+        session.add_all([
+            # 10000 files / 100s = 100 files/s. Big, slow.
+            ScanRun(library_id=lib.id, status="finished",
+                    stats={"seen": 10000, "walk_seconds": 100.0,
+                           "bytes_seen": 900, "files_per_s": 100.0}),
+            # 10 files / 1s = 10 files/s. Tiny, fast — must NOT drag the mean up.
+            ScanRun(library_id=lib.id, status="finished",
+                    stats={"seen": 10, "walk_seconds": 1.0,
+                           "bytes_seen": 100, "files_per_s": 10.0}),
+            # Excluded: not finished.
+            ScanRun(library_id=lib.id, status="failed",
+                    stats={"seen": 999999, "walk_seconds": 1.0}),
+            # Excluded: pre-feature / scope_missing row with no walk_seconds key
+            # (-> NULL, fails the `> 0` predicate rather than raising).
+            ScanRun(library_id=lib.id, status="finished", stats={"seen": 500}),
+            # Excluded: zero-duration guard.
+            ScanRun(library_id=lib.id, status="finished",
+                    stats={"seen": 5, "walk_seconds": 0.0}),
+        ])
+        await session.commit()
+
+    async with Session() as session:
+        tp = await scan_throughput(session)
+    await engine.dispose()
+
+    assert tp["runs"] == 2
+    assert tp["files"] == 10010
+    assert tp["seconds"] == 101.0
+    # Weighted: 10010/101 = 99.1 files/s -> 5947.5/min. A naive AVG of the two
+    # per-run rates would be (100+10)/2 = 55 files/s = 3300/min. Guard the gap.
+    assert tp["files_per_min"] == pytest.approx(10010 * 60.0 / 101.0, rel=1e-3)
+    assert tp["files_per_min"] > 5000
+    # bytes_seen sums too, and missing-key rows contribute 0 rather than NULL.
+    assert tp["bytes"] == 1000
+    assert tp["bytes_per_s"] == round(1000 / 101.0)
+    assert tp["window_days"] == 30
 
 
 async def test_cpu_load_computed(monkeypatch):

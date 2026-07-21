@@ -98,7 +98,7 @@ WHERE items_fts MATCH ?`
 const selectItemColumnsQualified = `
 SELECT items.id, items.root_id, items.rel_path, items.filename, items.extension,
        items.size, items.mtime_ns, items.quick_hash, items.content_hash,
-       items.media_type, items.meta, items.status, items.is_sidecar,
+       items.file_category, items.file_group, items.meta, items.status, items.is_sidecar,
        items.sidecar_of, items.first_seen, items.last_seen, items.synced_at,
        items.local_seq_no
 FROM items`

@@ -17,7 +17,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
-from filearr.models import Item, ItemStatus, Library, MediaType
+from filearr.models import Item, ItemStatus, Library
 from filearr.tasks.move import MovePlan, plan_moves
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -174,7 +174,7 @@ async def _hash_all(session, lib):
 
 
 async def _mk_library(session, root, name):
-    lib = Library(name=name, root_path=str(root), enabled_types=[])
+    lib = Library(name=name, root_path=str(root), enabled_categories=[])
     session.add(lib)
     await session.commit()
     return lib
@@ -367,7 +367,7 @@ async def test_moved_file_with_sidecars_relink(session, tmp_path):
     movie = (
         await session.execute(
             select(Item).where(
-                Item.library_id == lib.id, Item.media_type == MediaType.video
+                Item.library_id == lib.id, Item.file_category == "video"
             )
         )
     ).scalar_one()
@@ -391,7 +391,7 @@ async def test_moved_file_with_sidecars_relink(session, tmp_path):
     active = [r for r in rows if r.status == ItemStatus.active]
     # movie (survived) + 2 freshly-created sidecars at the new path
     assert len(active) == 3
-    survivor = next(r for r in active if r.media_type == MediaType.video)
+    survivor = next(r for r in active if r.file_category == "video")
     assert survivor.id == movie_id  # movie identity preserved across the move
     assert survivor.tags == ["keep"]
     assert survivor.rel_path.startswith("Dune 2021 [1080p]/")

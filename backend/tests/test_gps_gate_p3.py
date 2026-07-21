@@ -26,7 +26,7 @@ from filearr import search as search_mod
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Item, ItemStatus, Library, MediaType
+from filearr.models import Item, ItemStatus, Library
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -35,7 +35,7 @@ def _make_item(meta):
     return Item(
         id=uuid.uuid4(),
         library_id=uuid.uuid4(),
-        media_type=MediaType.image,
+        file_category="image", file_group="raster-photo",
         path="/data/p.jpg",
         rel_path="p.jpg",
         filename="p.jpg",
@@ -138,7 +138,7 @@ async def _seed(maker, *, expose_gps: bool) -> str:
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.image,
+            file_category="image", file_group="raster-photo",
             path="/data/l/p.jpg",
             rel_path="p.jpg",
             filename="p.jpg",

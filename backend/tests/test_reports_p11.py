@@ -24,7 +24,7 @@ from filearr import db as db_mod
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Item, Library, MediaType
+from filearr.models import Item, Library
 from filearr.quality_score import (
     BAND_OK,
     BAND_REACQUIRE,
@@ -183,7 +183,7 @@ async def _mk_item(
     library_id,
     rel_path,
     *,
-    media_type=MediaType.other,
+    file_category="other", file_group="other",
     status="active",
     extension="bin",
     size=100,
@@ -195,7 +195,7 @@ async def _mk_item(
     async with maker() as s:
         item = Item(
             library_id=library_id,
-            media_type=media_type,
+            file_category=file_category, file_group=file_group,
             status=status,
             path=f"/data/l/{rel_path}",
             rel_path=rel_path,
@@ -259,7 +259,7 @@ async def test_unmapped_extensions_grouped_counts(api):
     await _mk_item(maker, lib, "b.foo", extension="foo", size=20)
     await _mk_item(maker, lib, "c.bar", extension="bar", size=5)
     # a mapped file must not appear
-    await _mk_item(maker, lib, "v.mkv", media_type=MediaType.video, extension="mkv")
+    await _mk_item(maker, lib, "v.mkv", file_category="video", file_group="video", extension="mkv")
     r = await client.get("/api/v1/reports/unmapped_extensions")
     rows = r.json()["rows"]
     assert rows[0] == {"extension": "foo", "file_count": 2, "total_bytes": 30}
@@ -282,11 +282,11 @@ async def test_corrupt_media_classifies_ffprobe_vs_tag(api):
     client, maker = api
     lib = await _mk_lib(maker)
     await _mk_item(
-        maker, lib, "bad.mkv", media_type=MediaType.video,
+        maker, lib, "bad.mkv", file_category="video", file_group="video",
         metadata={"_extract_error": "ffprobe failed: Invalid data found when processing input"},
     )
     await _mk_item(
-        maker, lib, "song.mp3", media_type=MediaType.audio,
+        maker, lib, "song.mp3", file_category="audio", file_group="audio-lossy",
         metadata={"_extract_error": "tinytag could not read tags"},
     )
     await _mk_item(maker, lib, "clean.bin", metadata={})
@@ -311,12 +311,12 @@ async def test_low_quality_video_scored_and_filtered(api):
     lib = await _mk_lib(maker)
     # sub-HD -> flagged (score 40)
     await _mk_item(
-        maker, lib, "old.avi", media_type=MediaType.video,
+        maker, lib, "old.avi", file_category="video", file_group="video",
         metadata={"height": 480, "width": 640, "video_codec": "mpeg4", "resolution": "640x480"},
     )
     # well-encoded 1080p hevc -> score 0, excluded (below review band)
     await _mk_item(
-        maker, lib, "good.mkv", media_type=MediaType.video,
+        maker, lib, "good.mkv", file_category="video", file_group="video",
         metadata={"height": 1080, "width": 1920, "video_codec": "hevc", "bitrate": 5_000_000},
     )
     r = await client.get("/api/v1/reports/low_quality_video")
@@ -413,11 +413,11 @@ async def test_low_quality_pagination_respects_python_filter(api):
     # three flagged (sub-HD) videos interleaved with a clean one
     for i in range(3):
         await _mk_item(
-            maker, lib, f"bad{i}.avi", media_type=MediaType.video, size=100 - i,
+            maker, lib, f"bad{i}.avi", file_category="video", file_group="video", size=100 - i,
             metadata={"height": 480, "width": 640, "video_codec": "mpeg4"},
         )
     await _mk_item(
-        maker, lib, "good.mkv", media_type=MediaType.video,
+        maker, lib, "good.mkv", file_category="video", file_group="video",
         metadata={"height": 1080, "width": 1920, "video_codec": "hevc", "bitrate": 5_000_000},
     )
     p1 = (await client.get("/api/v1/reports/low_quality_video?limit=2&offset=0")).json()
@@ -456,7 +456,7 @@ async def test_csv_streams_in_chunks(api):
         await s.execute(
             text(
                 "INSERT INTO items "
-                "(library_id, media_type, status, path, rel_path, filename, "
+                "(library_id, file_category, status, path, rel_path, filename, "
                 " extension, size, mtime, metadata, user_metadata, external_ids, tags) "
                 "SELECT :lib, 'other', 'active', '/p/'||g, 'f'||g||'.bin', "
                 "'f'||g||'.bin', 'bin', 1, :mt, '{}'::jsonb, '{}'::jsonb, "

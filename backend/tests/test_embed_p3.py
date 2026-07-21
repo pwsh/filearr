@@ -38,7 +38,7 @@ from filearr.embed import (
     has_current_embedding,
     strip_embedding,
 )
-from filearr.models import Item, ItemStatus, MediaType
+from filearr.models import Item, ItemStatus
 
 DIM = 384
 VEC = [0.01 * i for i in range(DIM)]
@@ -48,7 +48,7 @@ def _item(**over):
     base = dict(
         id=uuid.uuid4(),
         library_id=uuid.uuid4(),
-        media_type=MediaType.document,
+        file_category="document", file_group="document-text",
         path="/data/a.pdf",
         rel_path="a.pdf",
         filename="a.pdf",

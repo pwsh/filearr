@@ -52,7 +52,7 @@ from sqlalchemy import Select, Text, case, cast, func, literal, or_, select, tex
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr import share_map
-from filearr.models import Item, ItemStatus, Library, MediaType
+from filearr.models import Item, ItemStatus, Library
 from filearr.quality_score import REVIEW_BAND, score_item
 
 #: Server-side cursor batch size for streaming exports (research §6.2).
@@ -235,11 +235,14 @@ def _build_unmapped(params: ReportParams) -> Select:
             func.coalesce(func.sum(Item.size), 0).label("total_bytes"),
         )
         # sidecar_of IS NULL EXCLUDES linked sidecars (.nfo, *_JRSidecar.xml,
-        # .xmp, .thm, ...): they are intentionally media_type='other' bookkeeping
-        # rows and would otherwise drown the real unmapped-extension signal
-        # (nfo+xml alone were ~122k of the live 750k-corpus rows). _ACTIVE
-        # already scopes to status='active', so trashed/missing are excluded too.
-        .where(_ACTIVE, Item.media_type == MediaType.other, Item.sidecar_of.is_(None))
+        # .xmp, .thm, ...): they are bookkeeping rows and would otherwise drown the
+        # real unmapped-extension signal (nfo+xml alone were ~122k of the live
+        # 750k-corpus rows). _ACTIVE already scopes to status='active'. W8-B:
+        # file_category='other' is the taxonomy catch-all (a genuinely unrecognised
+        # extension) — a tighter, more correct "unmapped" signal than the old
+        # media_type='other' bucket (which also swept archives/code/system files
+        # that now have real categories).
+        .where(_ACTIVE, Item.file_category == "other", Item.sidecar_of.is_(None))
         .group_by(ext)
         .order_by(func.count().desc(), ext.asc())
     )
@@ -331,7 +334,7 @@ def _build_largest(params: ReportParams) -> Select:
             Library.name.label("library"),
             Library.native_prefix.label("native_prefix"),
             Library.share_prefix.label("share_prefix"),
-            Item.media_type,
+            Item.file_category,
             Item.size,
         )
         .join(Library, Item.library_id == Library.id)
@@ -342,12 +345,11 @@ def _build_largest(params: ReportParams) -> Select:
 
 
 def _row_largest(r: Any) -> dict:
-    mt = r.media_type
     return {
         "item_id": str(r.item_id),
         "rel_path": r.rel_path,
         "library": r.library,
-        "media_type": mt.value if isinstance(mt, MediaType) else str(mt),
+        "file_category": r.file_category,
         "size": int(r.size),
         **_path_context(r),
     }
@@ -372,7 +374,7 @@ def _build_low_quality(params: ReportParams) -> Select:
         .join(Library, Item.library_id == Library.id)
         .where(
             _ACTIVE,
-            Item.media_type == MediaType.video,
+            Item.file_category == "video",
             Item.metadata_.has_key("height"),
         )
         .order_by(Item.size.desc(), Item.rel_path.asc())
@@ -478,7 +480,7 @@ _REPORTS: tuple[CannedReport, ...] = (
         id="unmapped_extensions",
         title="Unmapped extensions",
         description=(
-            "Non-sidecar extensions landing in media_type='other' — count and "
+            "Non-sidecar extensions landing in file_category='other' — count and "
             "total bytes per extension, most common first. Linked sidecars "
             "(.nfo/.xml/.xmp/.thm/artwork) are excluded so the tail is genuinely "
             "unmappable. An empty extension row ('') = extensionless files (no "
@@ -522,7 +524,7 @@ _REPORTS: tuple[CannedReport, ...] = (
         id="largest_files",
         title="Largest files",
         description="The largest files by size (top N, default 500).",
-        columns=("rel_path", "library", "media_type", "size", *PATH_CONTEXT_COLUMNS),
+        columns=("rel_path", "library", "file_category", "size", *PATH_CONTEXT_COLUMNS),
         build=_build_largest,
         row=_row_largest,
         supports_library=True,

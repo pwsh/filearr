@@ -17,7 +17,7 @@ from filearr.errors import (
 )
 from filearr.jobs_stats import jobs_summary, running_jobs, thumbnail_totals
 from filearr.meili_stats import meili_snapshot
-from filearr.models import Item, ItemStatus, MediaType
+from filearr.models import Item, ItemStatus
 from filearr.queue_stats import queue_snapshot
 from filearr.schemas import FailedJobPage
 from filearr.security import require_scope
@@ -102,11 +102,13 @@ async def _thumbnail_stats(session: AsyncSession) -> dict:
 @router.get("/stats", dependencies=[Depends(require_scope("read"))])
 async def stats(session: AsyncSession = Depends(get_session)) -> dict:
     rows = await session.execute(
-        select(Item.media_type, func.count(), func.coalesce(func.sum(Item.size), 0))
+        select(Item.file_category, func.count(), func.coalesce(func.sum(Item.size), 0))
         .where(Item.status == "active")
-        .group_by(Item.media_type)
+        .group_by(Item.file_category)
     )
-    by_type = {mt.value: {"count": c, "bytes": int(b)} for mt, c, b in rows}
+    # W8-B: keyed by taxonomy file_category (the successor to media_type). A NULL
+    # category (a not-yet-(re)scanned row) buckets under "unclassified".
+    by_type = {(cat or "unclassified"): {"count": c, "bytes": int(b)} for cat, c, b in rows}
     # T8: extraction throughput / queue-depth observability (single aggregate
     # read over procrastinate_jobs; cheap, read-only). Exposes extract backlog
     # depth + done/failed counts so operators can watch a large scan drain.
@@ -207,6 +209,42 @@ async def system_share_map() -> list[dict]:
     from filearr import share_map
 
     return [e.model_dump() for e in share_map.get_entries()]
+
+
+class FileGroupOut(BaseModel):
+    """One file-group taxonomy entry (search-UI facet + external reference; see
+    ``filearr.file_groups``). ``file_category`` is the group's parent category key
+    (W8-B replaced the removed ``media_type`` nominal parent); ``extensions`` is the
+    sorted bare-extension member list."""
+
+    id: str
+    label: str
+    file_category: str
+    description: str
+    extensions: list[str]
+
+
+@router.get(
+    "/system/file-groups",
+    response_model=list[FileGroupOut],
+    dependencies=[Depends(require_scope("read"))],
+)
+async def file_groups() -> list[dict]:
+    """The file-group taxonomy registry (read scope) — the finer, extension-derived
+    similarity layer beneath ``file_category``.
+
+    Returns one ``{id, label, file_category, description, extensions}`` object per
+    group, in canonical registry order, for the search-UI ``file_group`` facet and
+    external reference. ``file_group`` is a pure projection of the extension (see
+    ``search.build_doc`` / ``filearr.file_groups.detect_group``), filterable and
+    facet-searchable.
+
+    NOTE: after the extension map changes, run ``POST /system/rebuild-index`` so
+    existing search documents are re-projected with their ``file_group`` value —
+    newly scanned/updated items get it automatically."""
+    from filearr.file_groups import registry_payload
+
+    return registry_payload()
 
 
 @router.post(
@@ -440,70 +478,76 @@ RECLASSIFY_SYNC_BATCH = 1000
 async def reclassify_extensions(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Recompute every active item's ``media_type`` from the CURRENT extension map
-    and re-sync the changed docs (OPS-T4, admin scope).
+    """Recompute every active item's ``(file_category, file_group)`` from the CURRENT
+    taxonomy and re-sync the changed docs (OPS-T4, admin scope; W8-B).
 
-    Existing items keep the ``media_type`` assigned at their last scan; expanding
-    ``media_types.EXT_MAP`` (e.g. tif->image, 3gp->video, psd->image) only takes
-    effect on rescan. This endpoint applies the new map in place WITHOUT forcing a
-    full filesystem rescan: for each mapped ``MediaType`` it runs one set-based
-    ``UPDATE ... WHERE extension IN (...) AND media_type != <type>`` (extensions
-    are stored bare + lowercased, matching ``media_types.detect``), then a final
-    pass demotes anything whose extension is no longer mapped back to ``other`` —
-    exactly mirroring ``detect()``. Sidecars are updated by the same extension
-    rule the scan uses (their ``media_type`` is also extension-derived), so this
-    stays consistent with a rescan.
+    Existing items keep the classification assigned at their last scan; an edit to
+    the taxonomy (add/reparent an extension, add a group/category) only takes effect
+    on rescan. This endpoint applies the current taxonomy in place WITHOUT a full
+    filesystem rescan: it groups the taxonomy's ``ext -> (category, group)`` map by
+    target and runs one set-based ``UPDATE ... WHERE extension IN (...)`` per target
+    (extensions are stored bare + lowercased, matching ``taxonomy.detect``), then a
+    final pass demotes anything whose extension is unmapped/NULL to
+    ``(other, other)``. Sidecars are updated by the same extension rule the scan
+    uses, so this stays consistent with a rescan.
 
     Every changed row is re-projected into Meilisearch via the normal incremental
-    ``index_sync`` path, deferred in bounded ``RECLASSIFY_SYNC_BATCH``-sized jobs
-    (never one giant payload). Returns ``{changed, by_type}`` where ``by_type``
-    maps each destination ``media_type`` to how many rows moved INTO it."""
-    from filearr import worker
+    ``index_sync`` path, deferred in bounded ``RECLASSIFY_SYNC_BATCH``-sized jobs.
+    Returns ``{changed, by_category}`` where ``by_category`` maps each destination
+    ``file_category`` to how many rows moved INTO it."""
+    from filearr import taxonomy, worker
 
-    # Reverse the extension map into {MediaType: [ext, ...]} and the full set of
-    # mapped extensions (for the demote-to-other reconciliation pass).
-    from filearr.media_types import EXT_MAP
-
-    by_ext_type: dict[MediaType, list[str]] = {}
-    for ext, mt in EXT_MAP.items():
-        by_ext_type.setdefault(mt, []).append(ext)
-    all_mapped = list(EXT_MAP.keys())
+    # Snapshot the current taxonomy and derive the ext -> (category, group) map.
+    tax = await taxonomy.load(session)
+    # Group extensions by their (category, group) target so each target is one
+    # bounded set-based UPDATE.
+    targets: dict[tuple[str, str], list[str]] = {}
+    for ext, group in tax.ext_to_group.items():
+        category = tax.group_to_category.get(group, taxonomy.CATEGORY_OTHER)
+        targets.setdefault((category, group), []).append(ext)
+    all_mapped = list(tax.ext_to_group.keys())
 
     counts: dict[str, int] = {}
     changed_ids: list[str] = []
 
-    for mt, exts in by_ext_type.items():
+    for (category, group), exts in targets.items():
         result = await session.execute(
             update(Item)
             .where(
                 Item.status == ItemStatus.active,
-                Item.media_type != mt,
                 Item.extension.in_(exts),
+                or_(
+                    Item.file_category.is_distinct_from(category),
+                    Item.file_group.is_distinct_from(group),
+                ),
             )
-            .values(media_type=mt)
+            .values(file_category=category, file_group=group)
             .returning(Item.id)
         )
         ids = [str(r[0]) for r in result]
         if ids:
-            counts[mt.value] = len(ids)
+            counts[category] = counts.get(category, 0) + len(ids)
             changed_ids.extend(ids)
 
-    # Reconciliation: an item whose extension is NULL or no longer in the map must
-    # fall back to 'other' (matches detect()). ``NOT IN`` is NULL-blind, so the
+    # Reconciliation: an item whose extension is NULL or no longer mapped falls back
+    # to (other, other) (matches taxonomy.detect). ``NOT IN`` is NULL-blind, so the
     # explicit ``IS NULL`` arm is required to catch extensionless files.
     result = await session.execute(
         update(Item)
         .where(
             Item.status == ItemStatus.active,
-            Item.media_type != MediaType.other,
             or_(Item.extension.is_(None), Item.extension.notin_(all_mapped)),
+            or_(
+                Item.file_category.is_distinct_from(taxonomy.CATEGORY_OTHER),
+                Item.file_group.is_distinct_from(taxonomy.GROUP_OTHER),
+            ),
         )
-        .values(media_type=MediaType.other)
+        .values(file_category=taxonomy.CATEGORY_OTHER, file_group=taxonomy.GROUP_OTHER)
         .returning(Item.id)
     )
     other_ids = [str(r[0]) for r in result]
     if other_ids:
-        counts[MediaType.other.value] = len(other_ids)
+        counts[taxonomy.CATEGORY_OTHER] = counts.get(taxonomy.CATEGORY_OTHER, 0) + len(other_ids)
         changed_ids.extend(other_ids)
 
     await session.commit()
@@ -513,7 +557,7 @@ async def reclassify_extensions(
     for i in range(0, len(changed_ids), RECLASSIFY_SYNC_BATCH):
         await worker.defer_index_sync(changed_ids[i : i + RECLASSIFY_SYNC_BATCH])
 
-    return {"changed": len(changed_ids), "by_type": counts}
+    return {"changed": len(changed_ids), "by_category": counts}
 
 
 

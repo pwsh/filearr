@@ -1,0 +1,28 @@
+# Dependabot — keeps the SHA-pinned GitHub Actions current.
+#
+# Pinning actions to commit SHAs (see .github/workflows/ci.yml) buys immutability
+# but freezes us on the code that existed the day we pinned: a security fix
+# upstream would never reach us. Dependabot closes that loop — it opens a PR that
+# rewrites both the SHA and the trailing `# vX.Y.Z` comment, so upgrades arrive as
+# something reviewable instead of something silently pulled in by a mutable tag.
+#
+# Scoped to github-actions deliberately. The Python (uv), npm and Go ecosystems
+# are NOT enabled here: this repo pins several dependencies against specific
+# advisories with human-verified justifications recorded in
+# backend/pyproject.toml (e.g. the pillow 11.x floor for CVE-2026-25990, the
+# authlib >=1.7.1 floor, the ldap3 check). Automated bumps there would fight
+# those decisions, so they stay manual until someone deliberately wires them up.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # One PR per action keeps the blast radius of a bad bump to a single
+    # workflow step and makes the diff trivial to audit against upstream.
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"

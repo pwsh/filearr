@@ -54,6 +54,24 @@ type Policy struct {
 	// UNLIMITED. Read at upload START; a mid-upload change applies on the next
 	// upload (documented). Additive — does not disturb the P7-T4 keys above.
 	UploadRatePerSec *int64 `json:"upload_rate_bytes_per_sec"`
+
+	// W8-E central File Extension Similarity Taxonomy version. Central injects this
+	// computed key into every policy doc; the daemon version-gates its compact
+	// taxonomy fetch off it (fetch when this exceeds the cached snapshot's
+	// version). Absent (nil) / never-contacted => the agent classifies against its
+	// baked-in seed. Not operator-authored — central always sets the authoritative
+	// value.
+	TaxonomyVersion *int `json:"taxonomy_version"`
+}
+
+// TaxonomyVersionValue reports the central taxonomy version the policy advertises,
+// or 0 (the seed sentinel) when absent — the version-gate the daemon compares
+// against its cached taxonomy snapshot.
+func (p Policy) TaxonomyVersionValue() int {
+	if p.TaxonomyVersion == nil {
+		return 0
+	}
+	return *p.TaxonomyVersion
 }
 
 // UploadRateBytesPerSec is the per-agent staging-upload token-bucket ceiling in

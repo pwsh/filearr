@@ -17,13 +17,6 @@ type SidecarStats struct {
 	Linked   int
 }
 
-// primaryTypes are the media types considered "primary" parent candidates for
-// directory-level artwork. Mirrors associate._PRIMARY_TYPES.
-var primaryTypes = map[MediaType]bool{
-	MediaVideo: true, MediaAudio: true, MediaAudiobook: true, MediaSample: true,
-	MediaModel3D: true, MediaDocument: true, MediaSpreadsheet: true, MediaImage: true,
-}
-
 type dirStemKey struct {
 	dir  string
 	stem string
@@ -31,8 +24,10 @@ type dirStemKey struct {
 
 // resolveLinks is the pure planner ported from associate.resolve_links: given the
 // active items for a root, returns {sidecarID: parentID} ("" parent = unresolved).
-// Only sidecars appear as keys.
-func resolveLinks(items []*index.Item) map[string]string {
+// Only sidecars appear as keys. "Primary" (media-ish) parents are now decided by
+// the taxonomy classifier's IsPrimaryCategory (the categories with an extractor),
+// so operator taxonomy edits flow into sidecar association (W8-E).
+func resolveLinks(items []*index.Item, classifier Classifier) map[string]string {
 	byDirStem := map[dirStemKey]*index.Item{}
 	dirPrimaries := map[string][]*index.Item{}
 	classified := map[string]*sidecarInfo{}
@@ -42,13 +37,13 @@ func resolveLinks(items []*index.Item) map[string]string {
 		classified[it.ID] = info
 		if info == nil { // a real media file — eligible parent
 			key := dirStemKey{dir: dirOf(it.RelPath), stem: stemOf(it.RelPath)}
-			mt := MediaType(it.MediaType)
+			primary := classifier.IsPrimaryCategory(it.FileCategory)
 			existing := byDirStem[key]
-			// Prefer a primary media type on stem collision (e.g. .mkv over .srt).
-			if existing == nil || (primaryTypes[mt] && !primaryTypes[MediaType(existing.MediaType)]) {
+			// Prefer a primary category on stem collision (e.g. .mkv over .srt).
+			if existing == nil || (primary && !classifier.IsPrimaryCategory(existing.FileCategory)) {
 				byDirStem[key] = it
 			}
-			if primaryTypes[mt] {
+			if primary {
 				d := dirOf(it.RelPath)
 				dirPrimaries[d] = append(dirPrimaries[d], it)
 			}
@@ -99,7 +94,7 @@ func resolveLinks(items []*index.Item) map[string]string {
 // scratch (idempotent) and persists only the changed FKs. Ported from
 // associate.associate_sidecars (minus NFO metadata folding). Runs after move
 // detection so it sees surviving ids.
-func associateSidecars(ctx context.Context, store *index.Store, rootID string) (SidecarStats, error) {
+func associateSidecars(ctx context.Context, store *index.Store, rootID string, classifier Classifier) (SidecarStats, error) {
 	existing, err := store.LoadItems(ctx, rootID)
 	if err != nil {
 		return SidecarStats{}, err
@@ -112,7 +107,7 @@ func associateSidecars(ctx context.Context, store *index.Store, rootID string) (
 			byID[it.ID] = it
 		}
 	}
-	links := resolveLinks(active)
+	links := resolveLinks(active, classifier)
 
 	var stats SidecarStats
 	tx, err := store.Begin(ctx)

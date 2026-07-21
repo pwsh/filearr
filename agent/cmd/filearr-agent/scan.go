@@ -15,6 +15,7 @@ import (
 	"github.com/filearr/filearr/agent/internal/query"
 	"github.com/filearr/filearr/agent/internal/scan"
 	"github.com/filearr/filearr/agent/internal/shares"
+	"github.com/filearr/filearr/agent/internal/taxonomy"
 )
 
 // envShareHost overrides the hostname rendered into a P10-T11 share hint
@@ -37,13 +38,21 @@ const indexDBName = "index.db"
 const historyDBName = "history.db"
 
 // scanConfig is the on-disk form of a scan setup (persisted as scan.json).
+//
+// W8-E: the old media-type gate (enabled_types) is replaced by the File
+// Extension Similarity Taxonomy gate — enabled_categories (file_category) +
+// enabled_groups (file_group). A file is included iff BOTH are empty OR its
+// category is enabled OR its group is enabled (central's library model). This is
+// a BREAKING config change (an old scan.json's enabled_types key is ignored); a
+// fresh redeploy is expected.
 type scanConfig struct {
-	Roots          []string `json:"roots"`
-	Presets        []string `json:"presets,omitempty"`
-	ExcludeGlobs   []string `json:"exclude_globs,omitempty"`
-	IncludeGlobs   []string `json:"include_globs,omitempty"`
-	EnabledTypes   []string `json:"enabled_types,omitempty"`
-	ContentCeiling int64    `json:"content_ceiling_bytes,omitempty"`
+	Roots             []string `json:"roots"`
+	Presets           []string `json:"presets,omitempty"`
+	ExcludeGlobs      []string `json:"exclude_globs,omitempty"`
+	IncludeGlobs      []string `json:"include_globs,omitempty"`
+	EnabledCategories []string `json:"enabled_categories,omitempty"`
+	EnabledGroups     []string `json:"enabled_groups,omitempty"`
+	ContentCeiling    int64    `json:"content_ceiling_bytes,omitempty"`
 }
 
 // stringSlice is a repeatable string flag (e.g. -root a -root b).
@@ -83,6 +92,12 @@ func runScan(args []string) error {
 		fmt.Fprintln(os.Stderr, "central policy sets watch_mode=false; --watch disabled")
 	}
 
+	// W8-E: classify against the process-shared taxonomy cache — the compact
+	// taxonomy the daemon's poller keeps fresh at <dataDir>/taxonomy.json, or the
+	// baked-in seed when it has never been fetched (offline-first, symmetric with
+	// the cached-policy read above). A one-shot scan reads the snapshot once.
+	taxCache := taxonomy.NewCache(cfg.DataDir, newLogger())
+
 	store, err := index.Open(filepath.Join(cfg.DataDir, indexDBName))
 	if err != nil {
 		return fmt.Errorf("open local index: %w", err)
@@ -96,11 +111,13 @@ func runScan(args []string) error {
 	defer cancel()
 
 	opts := scan.Options{
-		EnabledPresets: sc.Presets,
-		ExcludeGlobs:   sc.ExcludeGlobs,
-		IncludeGlobs:   sc.IncludeGlobs,
-		EnabledTypes:   sc.EnabledTypes,
-		Hash:           hashPolicy(sc),
+		EnabledPresets:    sc.Presets,
+		ExcludeGlobs:      sc.ExcludeGlobs,
+		IncludeGlobs:      sc.IncludeGlobs,
+		EnabledCategories: sc.EnabledCategories,
+		EnabledGroups:     sc.EnabledGroups,
+		Taxonomy:          taxCache.Current(),
+		Hash:              hashPolicy(sc),
 		Progress: func(p scan.Progress) {
 			fmt.Printf("  ... seen=%d new=%d changed=%d\n", p.Seen, p.New, p.Changed)
 		},
@@ -232,7 +249,8 @@ func runSearch(args []string) error {
 				"extension":     r.Item.Extension,
 				"size":          r.Item.Size,
 				"mtime_ns":      r.Item.MtimeNs,
-				"media_type":    r.Item.MediaType,
+				"file_category": r.Item.FileCategory,
+				"file_group":    r.Item.FileGroup,
 				"status":        r.Item.Status,
 				"fuzzy_matched": r.FuzzyMatched,
 				"score":         r.Score,

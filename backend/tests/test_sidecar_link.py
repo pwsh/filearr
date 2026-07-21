@@ -5,14 +5,13 @@ Uses lightweight fakes rather than real ORM rows so no DB is needed."""
 import uuid
 from dataclasses import dataclass, field
 
-from filearr.models import MediaType
 from filearr.tasks.associate import resolve_links
 
 
 @dataclass
 class FakeItem:
     rel_path: str
-    media_type: MediaType
+    file_category: str
     size: int = 100
     id: uuid.UUID = field(default_factory=uuid.uuid4)
     sidecar_of: uuid.UUID | None = None
@@ -24,9 +23,9 @@ def _by_path(items):
 
 def test_episode_nfo_and_thumb_link_to_video():
     items = [
-        FakeItem("Arcane/S01/Arcane.S01E01.mkv", MediaType.video, size=10_000),
-        FakeItem("Arcane/S01/Arcane.S01E01.nfo", MediaType.other),
-        FakeItem("Arcane/S01/Arcane.S01E01-thumb.jpg", MediaType.image),
+        FakeItem("Arcane/S01/Arcane.S01E01.mkv", "video", size=10_000),
+        FakeItem("Arcane/S01/Arcane.S01E01.nfo", "other"),
+        FakeItem("Arcane/S01/Arcane.S01E01-thumb.jpg", "image"),
     ]
     links = resolve_links(items)
     p = _by_path(items)
@@ -40,9 +39,9 @@ def test_episode_nfo_and_thumb_link_to_video():
 def test_sidecar_seen_before_parent_still_links():
     # Order sidecars FIRST — resolve_links must not depend on ordering.
     items = [
-        FakeItem("M/Dune (2021)-poster.jpg", MediaType.image),
-        FakeItem("M/Dune (2021).nfo", MediaType.other),
-        FakeItem("M/Dune (2021).mkv", MediaType.video, size=99999),
+        FakeItem("M/Dune (2021)-poster.jpg", "image"),
+        FakeItem("M/Dune (2021).nfo", "other"),
+        FakeItem("M/Dune (2021).mkv", "video", size=99999),
     ]
     links = resolve_links(items)
     p = _by_path(items)
@@ -53,9 +52,9 @@ def test_sidecar_seen_before_parent_still_links():
 
 def test_directory_poster_links_to_primary_largest():
     items = [
-        FakeItem("M/Dune/poster.jpg", MediaType.image),
-        FakeItem("M/Dune/Dune.mkv", MediaType.video, size=5_000_000_000),
-        FakeItem("M/Dune/trailer.mkv", MediaType.video, size=100),
+        FakeItem("M/Dune/poster.jpg", "image"),
+        FakeItem("M/Dune/Dune.mkv", "video", size=5_000_000_000),
+        FakeItem("M/Dune/trailer.mkv", "video", size=100),
     ]
     links = resolve_links(items)
     p = _by_path(items)
@@ -64,8 +63,8 @@ def test_directory_poster_links_to_primary_largest():
 
 def test_movie_nfo_links_to_directory_primary():
     items = [
-        FakeItem("M/Dune/movie.nfo", MediaType.other),
-        FakeItem("M/Dune/Dune (2021).mkv", MediaType.video, size=42),
+        FakeItem("M/Dune/movie.nfo", "other"),
+        FakeItem("M/Dune/Dune (2021).mkv", "video", size=42),
     ]
     links = resolve_links(items)
     p = _by_path(items)
@@ -73,15 +72,15 @@ def test_movie_nfo_links_to_directory_primary():
 
 
 def test_unresolvable_sidecar_maps_to_none():
-    items = [FakeItem("Loose/orphan.nfo", MediaType.other)]  # no parent in dir
+    items = [FakeItem("Loose/orphan.nfo", "other")]  # no parent in dir
     links = resolve_links(items)
     assert links[str(items[0].id)] is None
 
 
 def test_rescan_idempotent():
     items = [
-        FakeItem("M/Dune (2021).mkv", MediaType.video, size=999),
-        FakeItem("M/Dune (2021).nfo", MediaType.other),
+        FakeItem("M/Dune (2021).mkv", "video", size=999),
+        FakeItem("M/Dune (2021).nfo", "other"),
     ]
     first = resolve_links(items)
     second = resolve_links(items)
@@ -90,6 +89,6 @@ def test_rescan_idempotent():
 
 def test_sidecar_never_points_at_itself():
     # A lone .nfo directory-artwork with no primary should not self-link.
-    items = [FakeItem("X/movie.nfo", MediaType.other)]
+    items = [FakeItem("X/movie.nfo", "other")]
     links = resolve_links(items)
     assert links[str(items[0].id)] is None

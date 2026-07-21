@@ -96,7 +96,7 @@ async def _mk_library(maker, root, **kw):
         lib = Library(
             name=kw.pop("name", "lib"),
             root_path=str(root),
-            enabled_types=kw.pop("enabled_types", []),
+            enabled_categories=kw.pop("enabled_categories", []),
             **kw,
         )
         s.add(lib)
@@ -288,7 +288,7 @@ async def test_staged_off_defers_per_batch(env, tmp_path, monkeypatch):
     monkeypatch.setattr(get_settings(), "staged_pipeline", False)
     root = tmp_path / "lib"
     _touch(root, 600, "jpg")
-    lib = await _mk_library(env, root, name="off", enabled_types=["image"])
+    lib = await _mk_library(env, root, name="off", enabled_categories=["image"])
 
     calls: list[list[str]] = []
     _stub_defers(monkeypatch, scan_mod, calls)
@@ -300,10 +300,111 @@ async def test_staged_off_defers_per_batch(env, tmp_path, monkeypatch):
         stats = await scan_mod._scan_body(session, lib, run)
 
     assert stats["seen"] == 600
+    # Scan telemetry: total on-disk bytes walked, accumulated during the walk
+    # (Item has no scan_run_id, so this cannot be re-derived afterwards). Compare
+    # against the real files rather than a hardcoded number.
+    expected_bytes = sum(p.stat().st_size for p in root.iterdir() if p.is_file())
+    assert stats["bytes_seen"] == expected_bytes > 0
+    assert stats["bytes_per_s"] >= 0
     # 600 files @ FLUSH_EVERY=250 -> 2 mid-walk batches + 1 final = >=2 defer calls.
     assert len(calls) >= 2
     total = sum(len(c) for c in calls)
     assert total == 600
+
+
+async def test_scan_counts_gate_excluded_files(env, tmp_path, monkeypatch):
+    """The category/group gate reports HOW MANY files it rejected.
+
+    Without this the only visible number is `seen`, so a library whose selection
+    silently drops most of a folder looks like a broken scan ("the folder has 99k
+    files but the library shows 77k") with nothing to explain it.
+    """
+    import filearr.tasks.scan as scan_mod
+    from filearr.models import ScanRun
+
+    root = tmp_path / "lib"
+    _touch(root, 10, "jpg")          # image  -> admitted
+    _touch(root, 4, "txt", start=100)  # document -> rejected by the gate
+    # Only images are enabled, so the .txt files must be counted, not silent.
+    lib = await _mk_library(env, root, name="gated", enabled_categories=["image"])
+    _stub_defers(monkeypatch, scan_mod, [])
+
+    async with env() as session:
+        run = ScanRun(library_id=lib.id, stats={})
+        session.add(run)
+        await session.commit()
+        stats = await scan_mod._scan_body(session, lib, run)
+
+    assert stats["seen"] == 10
+    assert stats["excluded_gate"] == 4
+    assert stats["excluded"] == 4
+    # Nothing here is spec-excluded, pruned or unreadable.
+    assert stats["excluded_filtered"] == 0
+    assert stats["pruned_dirs"] == 0
+    assert stats["permission_denied"] == 0
+    # The headline invariant the UI relies on: seen + excluded == enumerated.
+    assert stats["seen"] + stats["excluded"] == 14
+
+
+def _audit_tree(tmp_path):
+    """keep.mkv + 2 spec-excluded files + a pruned dir holding 3 files."""
+    (tmp_path / "keep.mkv").write_bytes(b"a")
+    (tmp_path / "skip.tmp").write_bytes(b"b")
+    (tmp_path / ".hidden").write_bytes(b"c")
+    pruned = tmp_path / "node_modules"
+    (pruned / "deep").mkdir(parents=True)
+    (pruned / "buried.mkv").write_bytes(b"d")
+    (pruned / "deep" / "a.js").write_bytes(b"e")
+    (pruned / "deep" / "b.js").write_bytes(b"f")
+
+
+def test_walk_audit_tallies_spec_exclusions_and_prunes(tmp_path):
+    """`walk` fills a WalkAudit for its silent drop paths.
+
+    Default (count_pruned off): files inside a pruned tree are counted NOWHERE,
+    so the tally is explicitly a lower bound.
+    """
+    from pathspec import GitIgnoreSpec
+
+    from filearr.tasks.scan import WalkAudit, walk
+
+    _audit_tree(tmp_path)
+    spec = GitIgnoreSpec.from_lines(["*.tmp", ".*", "node_modules/"])
+    audit = WalkAudit()
+    rels = {rel for _p, rel, _s, _m in walk(str(tmp_path), spec, audit=audit)}
+
+    assert rels == {"keep.mkv"}
+    assert audit.excluded_filtered == 2            # skip.tmp + .hidden
+    assert audit.pruned_dirs == 1                  # node_modules
+    assert audit.pruned_paths == ["node_modules"]  # named, not just counted
+    # The whole point: 3 files are inside the pruned tree and are invisible.
+    assert audit.pruned_files == 0
+    assert audit.count_pruned is False
+
+
+def test_walk_audit_counts_pruned_files_when_opted_in(tmp_path):
+    """count_pruned makes the accounting reconcile EXACTLY.
+
+    seen + excluded + pruned_files == files on disk (6 here: keep.mkv,
+    skip.tmp, .hidden, buried.mkv, deep/a.js, deep/b.js). Without the opt-in
+    that identity is a lower bound, which is what made a live 21,978-file gap
+    unexplainable.
+    """
+    from pathspec import GitIgnoreSpec
+
+    from filearr.tasks.scan import WalkAudit, walk
+
+    _audit_tree(tmp_path)
+    spec = GitIgnoreSpec.from_lines(["*.tmp", ".*", "node_modules/"])
+    audit = WalkAudit(count_pruned=True)
+    rels = {rel for _p, rel, _s, _m in walk(str(tmp_path), spec, audit=audit)}
+
+    assert rels == {"keep.mkv"}
+    # Recursive: buried.mkv + deep/a.js + deep/b.js.
+    assert audit.pruned_files == 3
+    on_disk = sum(1 for p in tmp_path.rglob("*") if p.is_file())
+    assert on_disk == 6
+    assert len(rels) + audit.excluded_filtered + audit.pruned_files == on_disk
 
 
 async def test_staged_on_defers_once_at_end(env, tmp_path, monkeypatch):
@@ -316,7 +417,7 @@ async def test_staged_on_defers_once_at_end(env, tmp_path, monkeypatch):
     monkeypatch.setattr(get_settings(), "staged_pipeline", True)
     root = tmp_path / "lib"
     _touch(root, 600, "jpg")
-    lib = await _mk_library(env, root, name="on", enabled_types=["image"])
+    lib = await _mk_library(env, root, name="on", enabled_categories=["image"])
 
     calls: list[list[str]] = []
     _stub_defers(monkeypatch, scan_mod, calls)
@@ -341,7 +442,7 @@ async def test_staged_stopped_defers_seen_items(env, tmp_path, monkeypatch):
     monkeypatch.setattr(get_settings(), "staged_pipeline", True)
     root = tmp_path / "lib"
     _touch(root, 600, "jpg")
-    lib = await _mk_library(env, root, name="stop", enabled_types=["image"])
+    lib = await _mk_library(env, root, name="stop", enabled_categories=["image"])
 
     calls: list[list[str]] = []
     _stub_defers(monkeypatch, scan_mod, calls)
@@ -373,7 +474,7 @@ async def test_staged_cancelled_defers_nothing(env, tmp_path, monkeypatch):
     monkeypatch.setattr(get_settings(), "staged_pipeline", True)
     root = tmp_path / "lib"
     _touch(root, 600, "jpg")
-    lib = await _mk_library(env, root, name="cancel", enabled_types=["image"])
+    lib = await _mk_library(env, root, name="cancel", enabled_categories=["image"])
 
     calls: list[list[str]] = []
     _stub_defers(monkeypatch, scan_mod, calls)
@@ -405,13 +506,15 @@ def _file_facts(path: str):
 
 
 async def _mk_item(env, lib_id, path: str, media="other"):
-    from filearr.models import Item, MediaType
+    from filearr.file_groups import detect_category, detect_group
+    from filearr.models import Item
 
     name, ext, size = _file_facts(path)
     async with env() as s:
         item = Item(
             library_id=lib_id,
-            media_type=MediaType(media),
+            file_category=detect_category(path),
+            file_group=detect_group(path),
             path=path,
             rel_path=name,
             filename=name,

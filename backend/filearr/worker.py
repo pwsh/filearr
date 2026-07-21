@@ -486,10 +486,18 @@ async def defer_scan(
     library_id: str,
     *,
     rel_path: str | None = None,
+    recursive: bool = True,
     queueing_lock: str | None = None,
     force: bool = False,
 ) -> int | None:
-    """Enqueue a scan for a library, or a *scoped* scan of a subtree (P2-T6).
+    """Enqueue a scan for a library, or a *scoped* scan of a subtree (P2-T6) or a
+    single file (W9).
+
+    ``recursive`` (W9) is threaded onto the ``scan_library`` job so a non-recursive
+    directory scan walks only that dir's direct children. It is only passed as a
+    job arg when ``False`` (the ``scan_library`` task defaults ``recursive=True``),
+    so a full/hot-folder scan's job args stay byte-for-byte unchanged and old
+    queued jobs remain back-compatible.
 
     ``queueing_lock`` guarantees at most one *queued* scan per lock: Procrastinate
     rejects a second defer with the same lock while one is still waiting in the
@@ -519,6 +527,10 @@ async def defer_scan(
     kwargs: dict = {"library_id": library_id}
     if rel_path is not None:
         kwargs["rel_path"] = rel_path
+    # Only carry the flag when non-default so existing (recursive) scan job args
+    # are unchanged and pre-W9 queued jobs keep working (task default is True).
+    if not recursive:
+        kwargs["recursive"] = False
     async with proc_app.open_async():
         if not force and await scan_job_pending(library_id, rel_path):
             return None  # an unfinished scan for this scope already exists

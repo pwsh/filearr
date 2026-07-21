@@ -18,7 +18,7 @@
     heading = "",
   }: { item: Record<string, unknown>; exclude?: string[]; heading?: string } = $props();
 
-  const mediaType = $derived(typeof item.media_type === "string" ? item.media_type : "");
+  const mediaType = $derived(typeof item.file_category === "string" ? item.file_category : "");
   const libraryId = $derived(typeof item.library_id === "string" ? item.library_id : "");
   const meta = $derived(effectiveMeta(item));
 

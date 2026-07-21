@@ -28,7 +28,6 @@ from typing import Any
 
 from filearr.config import Settings
 from filearr.errors import sanitize_error
-from filearr.models import MediaType
 from filearr.ocr import OcrError, OcrPolicy, run_ocr, should_ocr
 
 
@@ -45,16 +44,17 @@ def _pixels(meta: dict[str, Any]) -> int | None:
     return None
 
 
-def is_ocr_eligible(path: str, media_type: MediaType) -> tuple[bool, bool]:
-    """Return ``(eligible, is_pdf)`` for the OCR pass.
+def is_ocr_eligible(path: str, file_category: str | None) -> tuple[bool, bool]:
+    """Return ``(eligible, is_pdf)`` for the OCR pass (W8-B: gated on taxonomy
+    ``file_category``, not the removed media_type).
 
-    Images are eligible (``is_pdf=False``); ``document`` items are eligible ONLY
-    when the file is a PDF (``is_pdf=True``) — the scanned-vs-text decision is left
-    to ``should_ocr`` (native text threshold). Everything else is ineligible.
+    ``image`` items are eligible (``is_pdf=False``); ``document`` items are eligible
+    ONLY when the file is a PDF (``is_pdf=True``) — the scanned-vs-text decision is
+    left to ``should_ocr`` (native text threshold). Everything else is ineligible.
     """
-    if media_type == MediaType.image:
+    if file_category == "image":
         return True, False
-    if media_type == MediaType.document:
+    if file_category == "document":
         return PurePath(path).suffix.lower() == ".pdf", True
     return False, False
 
@@ -62,7 +62,7 @@ def is_ocr_eligible(path: str, media_type: MediaType) -> tuple[bool, bool]:
 def ocr_metadata(
     path: str,
     *,
-    media_type: MediaType,
+    file_category: str | None,
     meta: dict[str, Any],
     prior_meta: dict[str, Any],
     source_hash: str | None,
@@ -77,7 +77,7 @@ def ocr_metadata(
     ocr_text_truncated}`` delta on success, or ``{"_ocr_error": ...}`` on engine
     failure (degrade — never fail the extract). Never raises.
     """
-    eligible, is_pdf = is_ocr_eligible(path, media_type)
+    eligible, is_pdf = is_ocr_eligible(path, file_category)
     if not eligible:
         return {}
 

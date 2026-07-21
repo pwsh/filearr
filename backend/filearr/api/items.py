@@ -33,7 +33,6 @@ from filearr.models import (
     Item,
     ItemVersion,
     Library,
-    MediaType,
     ThumbnailManifest,
 )
 from filearr.schemas import (
@@ -85,7 +84,7 @@ def _validate_user_metadata_write(
     if not to_check:
         return
     here = applicable_defs(
-        defs, media_type=item.media_type.value, library_id=str(item.library_id)
+        defs, file_category=item.file_category, library_id=str(item.library_id)
     )
     if not here:
         return
@@ -475,7 +474,7 @@ async def get_thumb(
     # 404 -- the client renders a placeholder and the <img> naturally retries on a
     # later render, by which point the queued frame-grab has landed. Best-effort:
     # a transient enqueue failure just means the next request re-queues.
-    if item.media_type == MediaType.video:
+    if item.file_category == "video":
         try:
             from filearr.worker import defer_thumb_item
 

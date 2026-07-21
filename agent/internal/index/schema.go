@@ -8,8 +8,13 @@ import (
 // schemaVersion is stamped into PRAGMA user_version so a future migration can
 // detect and upgrade an older store. v2 adds the P5-T4 replication outbox; v3
 // adds the store_flags table (the durable rebuilt marker, P5-T5); v4 adds the
-// P12-T13 thumb_markers table (local-only thumbnail generation cursor).
-const schemaVersion = 4
+// P12-T13 thumb_markers table (local-only thumbnail generation cursor); v5
+// (W8-E) replaces the static media_type column with the File Extension
+// Similarity Taxonomy pair file_category + file_group. No in-place migration —
+// an older store fails integrity/version and is rebuilt from a fresh walk
+// (disposable-index philosophy, invariant 1), which re-classifies every item
+// against the live taxonomy.
+const schemaVersion = 5
 
 // schemaSQL is the full DDL. The items table mirrors a narrow subset of central
 // items (agent/docs/layout.md): identity is (root_id, rel_path). mtime_ns is
@@ -32,10 +37,11 @@ CREATE TABLE IF NOT EXISTS items (
     extension    TEXT,
     size         INTEGER,
     mtime_ns     INTEGER,
-    quick_hash   TEXT,
-    content_hash TEXT,
-    media_type   TEXT,
-    meta         TEXT,
+    quick_hash    TEXT,
+    content_hash  TEXT,
+    file_category TEXT,
+    file_group    TEXT,
+    meta          TEXT,
     status       TEXT NOT NULL,
     is_sidecar   INTEGER NOT NULL DEFAULT 0,
     sidecar_of   TEXT,

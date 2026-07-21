@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import agent_config, audit
+from filearr import agent_config, audit, taxonomy
 from filearr import policy as policy_mod
 from filearr.api.agent_commands import _authenticate_agent
 from filearr.api.agents import require_agents_enabled
@@ -134,7 +134,19 @@ async def get_agent_policy(
     )
     pol = agent_config.merge_group_into_policy(pol, group)
     group_tag = agent_config.group_etag_tag(group)
-    etag = f'"{scope}/{version}/g:{group_tag}"' if group_tag else f'"{scope}/{version}"'
+
+    # W8-E: surface the central File Extension Similarity Taxonomy version so a
+    # taxonomy edit invalidates the agent's policy cache. The version rides the
+    # policy body (an additive, computed key the agent reads to version-gate its
+    # compact-taxonomy fetch) AND the ETag (a bump forces a 200, not a 304, even
+    # when scope/version are unchanged). Central always sets the authoritative
+    # value — an operator-authored ``taxonomy_version`` key does not win.
+    tax_version = await taxonomy.current_version(session)
+    pol = {**pol, "taxonomy_version": tax_version}
+    etag_core = f"{scope}/{version}"
+    if group_tag:
+        etag_core += f"/g:{group_tag}"
+    etag = f'"{etag_core}/t:{tax_version}"'
 
     inm = request.headers.get("if-none-match")
     if inm and _etag_matches(inm, etag):
@@ -143,6 +155,35 @@ async def get_agent_policy(
         {"scope": scope, "version": version, "policy": pol},
         headers={"ETag": etag},
     )
+
+
+# --------------------------------------------------------------------------- #
+# Agent plane — GET /agents/{id}/taxonomy (bearer; compact resolution payload)  #
+# --------------------------------------------------------------------------- #
+@router.get(
+    "/agents/{agent_id}/taxonomy",
+    dependencies=[Depends(require_agents_enabled)],
+)
+async def get_agent_taxonomy(
+    agent_id: uuid.UUID,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """Serve the COMPACT File Extension Similarity Taxonomy an agent resolves
+    against locally (W8-E) — NOT the admin ``GET /taxonomy`` tree.
+
+    The agent fetches this VERSION-GATED: after a policy poll surfaces a newer
+    ``taxonomy_version`` than the agent's cached snapshot, it pulls this payload
+    once and persists it. Because it is version-gated, shipping the full
+    ~1271-entry ``ext_to_group`` map each fetch is fine. The payload is exactly
+    :meth:`filearr.taxonomy.Taxonomy.agent_payload` — flat lookup maps plus the
+    ``primary_categories`` sidecar-parent set (the categories with an extractor).
+
+    Agent-plane auth (the same interim cert-fingerprint bearer / mTLS-header seam
+    as the policy + replication endpoints); 404 when the agents feature is off."""
+    await _authenticate_agent(session, agent_id, request)
+    payload = await taxonomy.agent_payload(session)
+    return JSONResponse(payload)
 
 
 # --------------------------------------------------------------------------- #

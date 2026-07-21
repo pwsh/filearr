@@ -26,7 +26,7 @@ from filearr import thumbs as th
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Item, Library, MediaType, ThumbnailManifest
+from filearr.models import Item, Library, ThumbnailManifest
 
 from .conftest import FFMPEG, requires_ffmpeg
 
@@ -507,7 +507,7 @@ async def _seed_image(maker, tmp_path, *, name="pic.png", hashed=True) -> str:
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.image,
+            file_category="image", file_group="raster-photo",
             path=str(src),
             rel_path=name,
             filename=name,
@@ -574,7 +574,7 @@ async def test_serve_404_for_undecodable_source(env, tmp_path):
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.document,
+            file_category="document", file_group="document-text",
             path=str(tmp_path / "x.pdf"),
             rel_path="x.pdf",
             filename="x.pdf",
@@ -645,7 +645,7 @@ async def test_sidecar_artwork_first_beats_embedded_art(env, tmp_path):
         s.add(lib)
         await s.flush()
         parent = Item(
-            library_id=lib.id, media_type=MediaType.audiobook, path=m4b,
+            library_id=lib.id, file_category="audio", file_group="audiobook", path=m4b,
             rel_path="book.m4b", filename="book.m4b", extension=".m4b",
             size=os.path.getsize(m4b), mtime=_dt.datetime.now(_dt.UTC),
             quick_hash="qhbook",
@@ -653,7 +653,7 @@ async def test_sidecar_artwork_first_beats_embedded_art(env, tmp_path):
         s.add(parent)
         await s.flush()
         art = Item(
-            library_id=lib.id, media_type=MediaType.image, path=str(poster),
+            library_id=lib.id, file_category="image", file_group="raster-photo", path=str(poster),
             rel_path="poster.jpg", filename="poster.jpg", extension=".jpg",
             size=poster.stat().st_size, mtime=_dt.datetime.now(_dt.UTC),
             sidecar_of=parent.id, quick_hash="qhposter",
@@ -753,21 +753,21 @@ async def test_extract_ride_along_defers_thumb_item(env, tmp_path):
 def test_is_thumbnailable_matrix():
     from filearr.tasks.thumbs import is_thumbnailable
 
-    assert is_thumbnailable(MediaType.image)
-    assert is_thumbnailable(MediaType.audio)
-    assert is_thumbnailable(MediaType.audiobook)
-    assert is_thumbnailable(MediaType.sample)
-    assert is_thumbnailable(MediaType.video)  # slice 2: ffmpeg poster-frame
+    assert is_thumbnailable("image")
+    assert is_thumbnailable("audio")
+    assert is_thumbnailable("audio")
+    assert is_thumbnailable("audio")
+    assert is_thumbnailable("video")  # slice 2: ffmpeg poster-frame
     # P12-T5: ``document`` is thumbnailable ONLY for a .pdf extension. A
     # media-type-only probe (no rel_path) reports not-thumbnailable so a caller
     # never blindly enqueues every doc; office/ebook/comic docs stay placeholder.
-    assert not is_thumbnailable(MediaType.document)
-    assert is_thumbnailable(MediaType.document, "book.pdf")
-    assert is_thumbnailable(MediaType.document, "PAPER.PDF")  # case-insensitive
-    assert not is_thumbnailable(MediaType.document, "report.docx")
-    assert not is_thumbnailable(MediaType.document, "notes.txt")
-    assert not is_thumbnailable(MediaType.document, "comic.cbz")
-    assert not is_thumbnailable(MediaType.model3d)
+    assert not is_thumbnailable("document")
+    assert is_thumbnailable("document", "book.pdf")
+    assert is_thumbnailable("document", "PAPER.PDF")  # case-insensitive
+    assert not is_thumbnailable("document", "report.docx")
+    assert not is_thumbnailable("document", "notes.txt")
+    assert not is_thumbnailable("document", "comic.cbz")
+    assert not is_thumbnailable("three-d-cad")
 
 
 # --------------------------------------------------------------------------- #
@@ -790,7 +790,7 @@ async def _seed_video(maker, tmp_path, *, name="clip.mp4", duration=2.0, hdr=Fal
             meta["hdr"] = True
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             path=str(src),
             rel_path=name,
             filename=name,
@@ -836,7 +836,7 @@ async def test_sidecar_artwork_beats_video_generation(env, tmp_path):
     async with env["maker"]() as s:
         parent = (await s.execute(select(Item).where(Item.id == video_id))).scalar_one()
         art = Item(
-            library_id=parent.library_id, media_type=MediaType.image,
+            library_id=parent.library_id, file_category="image", file_group="raster-photo",
             path=str(poster), rel_path="poster.jpg", filename="poster.jpg",
             extension=".jpg", size=poster.stat().st_size,
             mtime=_dt.datetime.now(_dt.UTC), sidecar_of=parent.id,
@@ -904,7 +904,7 @@ async def test_stats_thumbnail_aggregates(env, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-async def _seed_pdf(maker, tmp_path, *, name="doc.pdf", media=MediaType.document) -> str:
+async def _seed_pdf(maker, tmp_path, *, name="doc.pdf", media="document") -> str:
     """Seed a document Item backed by a real 1-page PDF on disk."""
     import datetime as _dt
 
@@ -916,7 +916,8 @@ async def _seed_pdf(maker, tmp_path, *, name="doc.pdf", media=MediaType.document
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=media,
+            file_category=media,
+            file_group="pdf",
             path=str(src),
             rel_path=name,
             filename=name,

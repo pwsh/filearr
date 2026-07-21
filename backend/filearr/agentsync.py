@@ -728,8 +728,8 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
     - **Item identity stays central** — upsert by ``(library_id, rel_path)``;
       central owns the item id (the agent's local ids never cross the wire).
       ``items.source_agent_id`` is stamped on every agent-touched row. A create
-      derives ``media_type`` via ``media_types.detect`` and ``path_scope`` via the
-      SAME ``rbac.path_to_ltree`` the scanner uses. ``mtime`` (float epoch) →
+      derives ``(file_category, file_group)`` via the DB taxonomy and ``path_scope``
+      via the SAME ``rbac.path_to_ltree`` the scanner uses. ``mtime`` (float epoch) →
       UTC datetime (scan.py convention). NO extract is deferred (central cannot
       open agent files); agent-side sidecars simply arrive as plain items.
     - **Tombstone** — a deleted event (and the delete half of a moved) sets an
@@ -749,12 +749,14 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
     from sqlalchemy import select
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    from filearr import rbac
-    from filearr.media_types import detect
+    from filearr import rbac, taxonomy
     from filearr.models import AgentReplicationLog, Item, ItemStatus
 
     now = datetime.now(UTC)
     plan = plan_upserts(batch.entries)
+    # W8-A: load the (cached) taxonomy snapshot ONCE for the batch so a create can
+    # stamp (file_category, file_group) alongside media_type (pure lookups after).
+    tax = await taxonomy.load(session)
 
     # Reconstruct the (library_ref) for every delete target: plan.deletes is a bare
     # rel_path list (frozen contract), but a tombstone needs library context. A
@@ -815,9 +817,13 @@ async def apply_batch(session: Any, agent: Any, batch: ReplicationBatch) -> dict
         if row is None:
             filename = ev.rel_path.replace("\\", "/").rsplit("/", 1)[-1]
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else None
+            file_category, file_group = tax.detect(ev.rel_path)
             row = Item(
                 library_id=library.id,
-                media_type=detect(ev.rel_path),
+                # W8-B: stored taxonomy classification (authoritative; media_type
+                # is gone). Central classifies from the rel_path extension.
+                file_category=file_category,
+                file_group=file_group,
                 path=ev.rel_path,  # agent-side absolute-ish path; refreshed per event
                 rel_path=ev.rel_path,
                 filename=filename,
@@ -1187,8 +1193,7 @@ async def reconcile_finish(
 
     from sqlalchemy import select
 
-    from filearr import rbac
-    from filearr.media_types import detect
+    from filearr import rbac, taxonomy
     from filearr.models import (
         AgentReconcileStaging,
         Item,
@@ -1196,6 +1201,9 @@ async def reconcile_finish(
     )
 
     sess = await _load_live_session(session, agent, session_id, now, ttl_seconds)
+    # W8-B: load the taxonomy snapshot once so a reconcile-created row stamps its
+    # (file_category, file_group) exactly like apply_batch / the scanner do.
+    tax = await taxonomy.load(session)
 
     staged = (
         await session.execute(
@@ -1248,9 +1256,12 @@ async def reconcile_finish(
         if row is None:
             filename = s.rel_path.replace("\\", "/").rsplit("/", 1)[-1]
             ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else None
+            file_category, file_group = tax.detect(s.rel_path)
             row = Item(
                 library_id=library.id,
-                media_type=detect(s.rel_path),
+                # W8-B: authoritative taxonomy classification (media_type is gone).
+                file_category=file_category,
+                file_group=file_group,
                 path=s.rel_path,
                 rel_path=s.rel_path,
                 filename=filename,

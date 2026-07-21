@@ -67,6 +67,16 @@ export const DSL_SECTIONS: DslSection[] = [
     ],
   },
   {
+    title: "group:",
+    body:
+      "Filter by the finer file group (raw-photo, audio-lossless, pdf, archive, …) " +
+      "— the granular child of kind.",
+    examples: [
+      { q: "group:raw-photo" },
+      { q: "group:audio-lossless" },
+    ],
+  },
+  {
     title: "ext:",
     body:
       "Filter by file extension. List several with ; — the leading dot is optional " +

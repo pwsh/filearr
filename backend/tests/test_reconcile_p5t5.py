@@ -30,8 +30,9 @@ from filearr.agentsync import ManifestRow, manifest_digest
 from filearr.api import agent_commands as agent_commands_mod
 from filearr.config import get_settings
 from filearr.db import get_session
+from filearr.file_groups import detect_category as detect
+from filearr.file_groups import detect_group
 from filearr.main import create_app
-from filearr.media_types import detect
 from filearr.models import (
     Agent,
     AgentReconcileSession,
@@ -116,7 +117,8 @@ async def _mk_item(
     async with maker() as s:
         it = Item(
             library_id=lib_id,
-            media_type=detect(rel_path),
+            file_category=detect(rel_path),
+            file_group=detect_group(rel_path),
             path=rel_path,
             rel_path=rel_path,
             filename=rel_path.replace("\\", "/").rsplit("/", 1)[-1],
@@ -415,7 +417,7 @@ async def test_finish_creates_library_for_new_root(db_maker):
         assert str(lib.source_agent_id) == str(agent_id)
         items = (await s.execute(select(Item))).scalars().all()
         assert {i.rel_path for i in items} == {"movies/x.mkv", "movies/y.mkv"}
-        assert all(i.media_type.value == "video" for i in items)
+        assert all(i.file_category == "video" for i in items)
         assert all(i.path_scope is not None for i in items)
 
 

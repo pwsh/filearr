@@ -60,7 +60,7 @@ class ResultRow(_Wire):
     extension: str | None = None
     size: int
     mtime: str  # ISO-8601 UTC
-    kind: str | None = None  # media_types classification, if known
+    kind: str | None = None  # taxonomy file_category classification, if known
     quick_hash: str | None = None
     content_hash: str | None = None
     fuzzy_matched: bool = False  # matched via the edit-distance re-rank, not exact

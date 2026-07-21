@@ -17,6 +17,15 @@
 	# We publish only the TLS port; Caddy must not try to bind :80 for HTTP->HTTPS
 	# redirects (that port isn't mapped and the app already owns plain HTTP).
 	auto_https disable_redirects
+
+	# HTTP/3 is deliberately OFF (live incident 2026-07-19) — kept in sync with
+	# Caddyfile.acme. Caddy's default `h1 h2 h3` advertises `Alt-Svc: h3`, but the
+	# published TLS port is TCP-only (Docker defaults to TCP without a `/udp`
+	# suffix), so QUIC never reaches the container and browsers honouring the
+	# advertisement stall on an otherwise healthy site.
+	servers {
+		protocols h1 h2
+	}
 }
 
 # Port-only site: matches any Host/SNI (hostname or bare IP) the LAN client uses.

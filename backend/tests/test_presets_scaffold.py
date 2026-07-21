@@ -8,7 +8,6 @@ inherit green data-integrity + pure-helper coverage.
 
 import pytest
 
-from filearr.models import MediaType
 from filearr.presets import (
     CACHEDIR_TAG_SIGNATURE,
     EXTENSION_GROUPS,
@@ -77,7 +76,7 @@ def test_get_preset_and_validation():
 
 
 def test_extension_groups_typed_and_bare_ext():
-    assert EXTENSION_GROUPS["raw_photos"].media_type is MediaType.image
+    assert EXTENSION_GROUPS["raw_photos"].file_category == "image"
     assert "cr2" in EXTENSION_GROUPS["raw_photos"].extensions
     for name, grp in EXTENSION_GROUPS.items():
         assert grp.extensions, name
@@ -87,7 +86,7 @@ def test_extension_groups_typed_and_bare_ext():
 
 def test_multiple_groups_per_mediatype_allowed():
     """R5: >1 group may target the same MediaType (union semantics)."""
-    image_groups = [n for n, g in EXTENSION_GROUPS.items() if g.media_type is MediaType.image]
+    image_groups = [n for n, g in EXTENSION_GROUPS.items() if g.file_category == "image"]
     assert {"raw_photos", "jpeg_family"} <= set(image_groups)
 
 

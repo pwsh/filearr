@@ -9,6 +9,7 @@
     type FailedJob,
     type JobsSummary,
     type ReapResult,
+    type ScanRunning,
   } from "./api";
   import { help } from "./help";
 
@@ -251,6 +252,20 @@
   function ratePerMin(key: string): number | null {
     const r = rates[key];
     return r == null ? null : r * 60;
+  }
+
+  // Files/min for a running scan: seen ÷ elapsed since started_at. Deliberately
+  // the same cumulative-average definition the SSE endpoint's `rate` uses, so
+  // the Jobs page and the Admin live view never disagree. Depends on `now`
+  // (1s ticker) so it keeps moving between 4s polls. Null when the backend sent
+  // no started_at or under a second has passed (the divisor would explode).
+  function scanFilesPerMin(s: ScanRunning): number | null {
+    if (!s.started_at) return null;
+    const started = Date.parse(s.started_at);
+    if (Number.isNaN(started)) return null;
+    const elapsedMin = (now - started) / 60000;
+    if (elapsedMin <= 1 / 60) return null;
+    return (s.stats.seen ?? 0) / elapsedMin;
   }
 
   // Compute I/O + network B/s from the cumulative counters between two polls.
@@ -762,6 +777,33 @@
             · {fmtBytes(summary.thumbs.bytes)}
           </div>
         {/if}
+        {#if q === "scan" && summary?.scan_throughput}
+          <!-- Aggregate walk throughput across recent FINISHED scans. Weighted
+               (total files ÷ total walk seconds), so one tiny scoped rescan
+               cannot skew it the way averaging per-run rates would. -->
+          {@const tp = summary.scan_throughput}
+          <div class="mt-2 flex items-baseline gap-2">
+            <span class="text-3xl font-bold tabular-nums" style="color: var(--accent)">
+              {tp.runs > 0 ? Math.round(tp.files_per_min).toLocaleString() : "—"}
+            </span>
+            <span class="text-xs text-slate-500">files/min avg</span>
+          </div>
+          <div class="mt-1 text-xs text-slate-500"
+            title="Weighted average across finished scans in the window: total files walked ÷ total walk seconds. NOT the mean of each run's rate — that would let a 3-file rescan outweigh a 500k-file full scan. Only the directory walk counts; extraction runs out-of-band on the extract queue.">
+            {#if tp.runs > 0}
+              {tp.runs} run{tp.runs === 1 ? "" : "s"} · last {tp.window_days}d
+            {:else}
+              no finished scans in the last {tp.window_days}d
+            {/if}
+          </div>
+          {#if tp.runs > 0}
+            <div class="mt-1 text-xs text-slate-500"
+              title="Total files walked and their total on-disk size across those runs, with the resulting throughput.">
+              walked <b class="tabular-nums text-slate-700 dark:text-slate-200">{tp.files.toLocaleString()}</b>
+              · {fmtBytes(tp.bytes)}{#if tp.bytes_per_s > 0} · {fmtRate(tp.bytes_per_s)}{/if}
+            </div>
+          {/if}
+        {/if}
         <div class="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs">
           <span class="text-slate-500">todo <b class="tabular-nums text-slate-700 dark:text-slate-200">{qCount(q, "todo")}</b></span>
           <span class="text-slate-500">doing <b class="tabular-nums text-slate-700 dark:text-slate-200">{qCount(q, "doing")}</b></span>
@@ -864,16 +906,34 @@
           <th class="py-2 pr-3">Seen</th>
           <th class="py-2 pr-3">New</th>
           <th class="py-2 pr-3">Changed</th>
+          <th
+            class="py-2 pr-3 text-right"
+            title="Files skipped: the library's category/group selection or the exclusion presets rejected them. seen + excluded = files enumerated."
+          >Excluded</th>
+          <th
+            class="py-2 pr-3 text-right"
+            title="Total on-disk size of the files walked so far."
+          >Size</th>
+          <th
+            class="py-2 pr-3 text-right"
+            title="Average since the scan started (seen ÷ elapsed), not an instantaneous rate. Seen advances in batches of 250, so short scans read as a staircase."
+          >Files/min</th>
         </tr>
       </thead>
       <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
         {#each summary.scans_running as s (s.id)}
+          {@const fpm = scanFilesPerMin(s)}
           <tr>
             <td class="py-2 pr-3 font-medium">{s.library_name}</td>
             <td class="py-2 pr-3 font-mono text-xs text-slate-500">{s.rel_path ?? "(whole library)"}</td>
             <td class="py-2 pr-3 tabular-nums text-slate-500">{s.stats.seen ?? 0}</td>
             <td class="py-2 pr-3 tabular-nums text-slate-500">{s.stats.new ?? 0}</td>
             <td class="py-2 pr-3 tabular-nums text-slate-500">{s.stats.changed ?? 0}</td>
+            <td class="py-2 pr-3 text-right tabular-nums text-slate-500">{s.stats.excluded ?? 0}</td>
+            <td class="py-2 pr-3 text-right tabular-nums text-slate-500">{fmtBytes(s.stats.bytes_seen ?? 0)}</td>
+            <td class="py-2 pr-3 text-right tabular-nums text-slate-500">
+              {fpm === null ? "—" : Math.round(fpm).toLocaleString()}
+            </td>
           </tr>
         {/each}
       </tbody>
@@ -913,8 +973,11 @@
                 {/if}
               </span>
               {#if prog}
+                {@const pfpm = scanFilesPerMin(prog)}
                 <span class="mt-0.5 block text-[10px] font-normal text-slate-500">
-                  seen {prog.stats.seen ?? 0} · new {prog.stats.new ?? 0} · changed {prog.stats.changed ?? 0}
+                  seen {prog.stats.seen ?? 0} · new {prog.stats.new ?? 0} · changed {prog.stats.changed ?? 0}{#if prog.stats.excluded} · excluded {prog.stats.excluded}{/if}
+                  {#if pfpm !== null}· {Math.round(pfpm).toLocaleString()}/min{/if}
+                  {#if prog.stats.bytes_seen}· {fmtBytes(prog.stats.bytes_seen)}{/if}
                 </span>
               {/if}
             </td>

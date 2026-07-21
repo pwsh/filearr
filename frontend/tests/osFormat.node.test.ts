@@ -1,6 +1,6 @@
 // UI-T15 — pure-logic tests for OS-aware share formatting. Runs on Node's
 // built-in test runner with native TypeScript type-stripping (Node >=22.18):
-// `node --test frontend/tests/`. No bundler / DOM — exercises the DOM-free
+// `npm test` from frontend/. No bundler / DOM — exercises the DOM-free
 // decision core in ../src/lib/osFormat.ts.
 
 import assert from "node:assert/strict";

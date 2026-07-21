@@ -28,6 +28,16 @@
 	# TLS and host-routes normally. This is the l4/http coexistence mechanism
 	# (HTTP app == default fallback); verified with `caddy validate` + local E2E.
 	servers :443 {
+		# HTTP/3 is deliberately OFF (live incident 2026-07-19). Caddy's default
+		# protocol set is `h1 h2 h3`, which advertises `Alt-Svc: h3=":443"` — but
+		# every 443 mapping we publish is TCP-only (Docker defaults to TCP without
+		# a `/udp` suffix), so QUIC datagrams never reach the container and browsers
+		# that honour the advertisement stall on a site that is otherwise healthy.
+		# Do NOT "fix" this by publishing UDP/443: the layer4 wrapper below peeks the
+		# TLS ClientHello on the TCP listener only, so a QUIC client hitting
+		# ca.<domain> would BYPASS the raw SNI passthrough and land on the HTTP app,
+		# breaking the agent CA renewal path (docs/ops/agents.md §7.4).
+		protocols h1 h2
 		listener_wrappers {
 			layer4 {
 				@ca tls sni ca.{$FILEARR_TLS_DOMAIN}

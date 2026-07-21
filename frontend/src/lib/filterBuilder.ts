@@ -23,6 +23,7 @@
 export type FieldKind =
   | "text"
   | "kind"
+  | "group"
   | "ext"
   | "size"
   | "modified"
@@ -86,6 +87,7 @@ export function opsFor(field: FieldKind): Op[] {
     case "text":
       return ["contains"];
     case "kind":
+    case "group":
     case "ext":
     case "tag":
       return ["is", "is_not"];
@@ -172,6 +174,8 @@ export function validateCondition(c: Condition): RowStatus {
       return v === "" ? incomplete("Enter text to match") : OK;
     case "kind":
       return v === "" ? incomplete("Choose a kind") : OK;
+    case "group":
+      return v === "" ? incomplete("Choose a group") : OK;
     case "tag":
       return v === "" ? incomplete("Enter a tag") : OK;
     case "ext": {
@@ -243,6 +247,7 @@ export function conditionToDsl(c: Condition): string | null {
       return neg + quoteIfNeeded(v);
 
     case "kind":
+    case "group":
     case "tag": {
       const not = c.op === "is_not" ? "-" : neg;
       return `${not}${c.field}:${quoteIfNeeded(v)}`;
@@ -308,6 +313,7 @@ export function conditionsToDsl(conditions: Condition[]): string {
 // --------------------------------------------------------------------------- //
 const KNOWN_KEYS = new Set([
   "kind",
+  "group",
   "ext",
   "size",
   "modified",
@@ -462,6 +468,7 @@ function filterToCondition(
 
   switch (lkey) {
     case "kind":
+    case "group":
     case "tag": {
       const c = newCondition(lkey as FieldKind);
       c.op = negated ? "is_not" : "is";
@@ -603,6 +610,7 @@ function applyPred(c: Condition, value: string): boolean {
 // rest so the UI can warn the user which conditions are dropped. Mapping table:
 //   text (contains, not-negated) -> q (space-joined)
 //   kind:is                      -> type
+//   group:is                     -> file_group (repeatable search param)
 //   ext:is (single)              -> extension
 //   size                         -> size_gte / size_lte (bytes)
 //   modified                     -> mtime_gte / mtime_lte (epoch seconds)
@@ -650,6 +658,10 @@ export function conditionsToSearchParams(conditions: Condition[]): SearchMapping
         break;
       case "kind":
         if (c.op === "is" && !c.negated && v) params.type = v;
+        else unmapped.push(c);
+        break;
+      case "group":
+        if (c.op === "is" && !c.negated && v) params.file_group = v;
         else unmapped.push(c);
         break;
       case "ext": {
@@ -728,6 +740,8 @@ export const CODEC_VECTORS: { dsl: string }[] = [
   { dsl: "-draft" },
   { dsl: "kind:video" },
   { dsl: "-kind:sample" },
+  { dsl: "group:raw-photo" },
+  { dsl: "-group:archive" },
   { dsl: "ext:pdf" },
   { dsl: "ext:mp4;mkv;avi" },
   { dsl: "-ext:tmp" },

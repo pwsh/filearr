@@ -194,6 +194,78 @@
       }
     },
     {
+      "name": "group_simple",
+      "input": "group:raw-photo",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "group",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "raw-photo"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "group_uppercase_lowered",
+      "input": "group:RAW-PHOTO",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "group",
+            "negated": false,
+            "value": {
+              "type": "string",
+              "value": "raw-photo"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "group_negated",
+      "input": "-group:archive",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "group",
+            "negated": true,
+            "value": {
+              "type": "string",
+              "value": "archive"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
+      "name": "group_bang_negated",
+      "input": "!group:pdf",
+      "ast": {
+        "terms": [],
+        "filters": [
+          {
+            "key": "group",
+            "negated": true,
+            "value": {
+              "type": "string",
+              "value": "pdf"
+            }
+          }
+        ],
+        "fuzzy": false
+      }
+    },
+    {
       "name": "ext_single",
       "input": "ext:pdf",
       "ast": {

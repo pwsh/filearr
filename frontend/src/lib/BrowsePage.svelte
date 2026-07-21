@@ -5,7 +5,13 @@
   // list (click → ItemDetail modal). Back/forward work because navigation is
   // pure hash mutation (App owns the router; this component reads props and emits
   // hash changes via gotoBrowse). All names render as text (untrusted).
-  import { libraryTree, listLibraries, type Library, type TreeResponse } from "./api";
+  import {
+    libraryTree,
+    listLibraries,
+    targetedScan,
+    type Library,
+    type TreeResponse,
+  } from "./api";
   import { buildDisplayPath, buildOpenUrl } from "./pathlinks";
   import { formatShare, shareLocation } from "./osFormat";
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
@@ -121,6 +127,59 @@
     return path ? `${path}/${name}` : name;
   }
 
+  // W9 targeted rescan (file or folder, optionally recursive). A transient toast
+  // confirms the enqueue; the run then appears in the Admin scan list / SSE.
+  let toast = $state<{ msg: string; ok: boolean } | null>(null);
+  let toastTimer: ReturnType<typeof setTimeout>;
+  function flashToast(msg: string, ok: boolean) {
+    toast = { msg, ok };
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => (toast = null), 3500);
+  }
+
+  async function scanTarget(rel: string, recursive: boolean, label: string) {
+    openFolderMenu = null;
+    try {
+      const r = await targetedScan(libraryId, { path: rel, recursive });
+      flashToast(
+        r.coalesced
+          ? `Scan of ${label} already in progress — joined it.`
+          : `Scan of ${label} queued.`,
+        true,
+      );
+    } catch (e) {
+      flashToast(`Could not scan ${label}: ${String(e)}`, false);
+    }
+  }
+
+  // Free-text targeted scan (automation-style: scan a path not necessarily shown
+  // in the current listing, e.g. a freshly laid-down folder). 404 = not on disk.
+  let showScanForm = $state(false);
+  let scanPath = $state("");
+  let scanRecursive = $state(true);
+  let scanBusy = $state(false);
+  async function submitScanForm(e: Event) {
+    e.preventDefault();
+    if (scanBusy) return;
+    scanBusy = true;
+    const target = scanPath.trim();
+    try {
+      const r = await targetedScan(libraryId, { path: target, recursive: scanRecursive });
+      flashToast(
+        r.coalesced
+          ? `Scan of "${target || "whole library"}" already in progress — joined it.`
+          : `Scan of "${target || "whole library"}" queued${r.is_file ? " (file)" : ""}.`,
+        true,
+      );
+      showScanForm = false;
+      scanPath = "";
+    } catch (e2) {
+      flashToast(`Could not scan "${target}": ${String(e2)}`, false);
+    } finally {
+      scanBusy = false;
+    }
+  }
+
   const shownFrom = $derived(tree && tree.total_items > 0 ? offset + 1 : 0);
   const shownTo = $derived(tree ? Math.min(offset + LIMIT, tree.total_items) : 0);
 
@@ -139,15 +198,61 @@
 
 <div class="mx-auto max-w-5xl">
   <div class="mt-2 rounded-xl border border-slate-200 p-3 dark:border-slate-800">
-    <Breadcrumbs
-      libraryName={libName || tree?.library_name || "Library"}
-      shareUrl={shareUrlRaw}
-      shareUnc={shareUncRaw}
-      relPath={path}
-      isFile={false}
-      onNavigate={(p) => gotoBrowse(libraryId, p)}
-    />
+    <div class="flex items-center gap-2">
+      <div class="min-w-0 grow">
+        <Breadcrumbs
+          libraryName={libName || tree?.library_name || "Library"}
+          shareUrl={shareUrlRaw}
+          shareUnc={shareUncRaw}
+          relPath={path}
+          isFile={false}
+          onNavigate={(p) => gotoBrowse(libraryId, p)}
+        />
+      </div>
+      <button
+        type="button"
+        class="shrink-0 rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+        title="Rescan this folder, or a specific path under this library, without a full library scan"
+        onclick={() => (showScanForm = !showScanForm)}>Targeted scan</button>
+    </div>
+
+    {#if showScanForm}
+      <form class="mt-3 flex flex-wrap items-end gap-2 border-t border-slate-200 pt-3 dark:border-slate-800" onsubmit={submitScanForm}>
+        <label class="flex min-w-[16rem] grow flex-col gap-1 text-xs">
+          <span class="text-slate-500">Path under the library root (blank = whole library; a file or folder)</span>
+          <input
+            class="rounded-lg border border-slate-300 px-2 py-1 text-sm dark:border-slate-700 dark:bg-slate-900"
+            placeholder={path || "e.g. Movies/Incoming"}
+            bind:value={scanPath} />
+        </label>
+        <label class="flex items-center gap-1 text-xs" title="Ignored when the path is a file">
+          <input type="checkbox" bind:checked={scanRecursive} />
+          Include subfolders
+        </label>
+        <button
+          type="button"
+          class="rounded-lg border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 dark:border-slate-700 dark:hover:bg-slate-800"
+          title="Fill in the folder you are currently viewing"
+          onclick={() => (scanPath = path)}>Use current folder</button>
+        <button
+          type="submit"
+          disabled={scanBusy}
+          class="rounded-lg bg-[var(--accent)] px-3 py-1 text-xs font-medium text-white disabled:opacity-50">
+          {scanBusy ? "Queueing…" : "Scan"}
+        </button>
+      </form>
+    {/if}
   </div>
+
+  {#if toast}
+    <div
+      class="mt-2 rounded-lg border px-3 py-2 text-sm {toast.ok
+        ? 'border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-200'
+        : 'border-red-300 bg-red-50 text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-200'}"
+      role="status">
+      {toast.msg}
+    </div>
+  {/if}
 
   {#if error}
     <p class="mt-6 text-red-500">{error}</p>
@@ -200,6 +305,18 @@
                     )}>
                   {copied === `folder-${f.name}` ? "Copied!" : "Copy path"}
                 </button>
+                <button
+                  type="button"
+                  class="block w-full rounded px-2 py-1 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
+                  onclick={() => scanTarget(folderRel(f.name), true, f.name)}>
+                  Scan folder + subfolders
+                </button>
+                <button
+                  type="button"
+                  class="block w-full rounded px-2 py-1 text-left hover:bg-slate-100 dark:hover:bg-slate-700"
+                  onclick={() => scanTarget(folderRel(f.name), false, f.name)}>
+                  Scan this folder only
+                </button>
               </div>
             {/if}
           </li>
@@ -236,7 +353,7 @@
               <div class="flex flex-col gap-1 p-2">
                 <span class="truncate text-sm font-medium" title={it.filename}>{it.title ?? it.filename}</span>
                 <span class="flex items-center gap-1">
-                  <span class="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] dark:bg-slate-800">{it.media_type}</span>
+                  <span class="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] dark:bg-slate-800">{it.file_category}</span>
                   <span class="ml-auto shrink-0 text-[10px] text-slate-400">{fmtSize(it.size)}</span>
                 </span>
               </div>
@@ -246,18 +363,24 @@
       {:else}
       <ul class="mt-2 divide-y divide-slate-200 dark:divide-slate-800">
         {#each tree.items as it (it.id)}
-          <li>
+          <li class="flex items-center gap-1">
             <button
               type="button"
               class="flex w-full items-center gap-3 py-3 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50"
               onclick={() => (selected = it.id)}>
               <Thumb id={it.id} size="h-9 w-9" />
-              <span class="rounded bg-slate-200 px-2 py-0.5 text-xs dark:bg-slate-800">{it.media_type}</span>
+              <span class="rounded bg-slate-200 px-2 py-0.5 text-xs dark:bg-slate-800">{it.file_category}</span>
               <span class="truncate font-medium" title={it.filename}>{it.title ?? it.filename}</span>
               {#if it.year}<span class="text-sm text-slate-500">({it.year})</span>{/if}
               <span class="grow"></span>
               <span class="shrink-0 text-xs text-slate-400">{fmtSize(it.size)}</span>
             </button>
+            <button
+              type="button"
+              class="shrink-0 rounded px-2 py-1 text-xs text-slate-400 hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800"
+              title="Rescan just this file"
+              aria-label="Rescan {it.filename}"
+              onclick={() => scanTarget(it.rel_path, false, it.filename)}>Rescan</button>
           </li>
         {/each}
       </ul>

@@ -39,6 +39,9 @@ DOC_EXAMPLES: list[str] = [
     # kind:
     "kind:video",
     "kind:audio",
+    # group:
+    "group:raw-photo",
+    "group:audio-lossless",
     # ext:
     "ext:pdf",
     "ext:mp4;mkv;avi",

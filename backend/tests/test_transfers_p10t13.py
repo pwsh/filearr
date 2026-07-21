@@ -32,7 +32,6 @@ from filearr.models import (
     AgentCommand,
     Item,
     Library,
-    MediaType,
     PathGrant,
     Principal,
     SecurityEvent,
@@ -126,7 +125,7 @@ async def _seed_item(
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             path=f"/agentroot/{rel}",
             rel_path=rel,
             filename=rel.rsplit("/", 1)[-1],

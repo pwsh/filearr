@@ -14,7 +14,6 @@ import pytest
 
 from filearr import ocr as ocr_mod
 from filearr.config import Settings
-from filearr.models import MediaType
 from filearr.ocr import OcrError, _normalize_ocr_text
 from filearr.tasks import ocr_run
 from filearr.tasks.ocr_run import is_ocr_eligible, ocr_metadata
@@ -49,10 +48,10 @@ def _settings(**over) -> Settings:
 
 
 def test_is_ocr_eligible_matrix():
-    assert is_ocr_eligible("/a/photo.png", MediaType.image) == (True, False)
-    assert is_ocr_eligible("/a/scan.pdf", MediaType.document) == (True, True)
-    assert is_ocr_eligible("/a/notes.docx", MediaType.document) == (False, True)
-    assert is_ocr_eligible("/a/song.mp3", MediaType.audio) == (False, False)
+    assert is_ocr_eligible("/a/photo.png", "image") == (True, False)
+    assert is_ocr_eligible("/a/scan.pdf", "document") == (True, True)
+    assert is_ocr_eligible("/a/notes.docx", "document") == (False, True)
+    assert is_ocr_eligible("/a/song.mp3", "audio") == (False, False)
 
 
 # --- ocr_metadata flow (subprocess mocked at run_ocr) ----------------------
@@ -69,7 +68,7 @@ def test_ocr_metadata_image_success(monkeypatch):
     monkeypatch.setattr(ocr_run, "run_ocr", fake_run_ocr)
     out = ocr_metadata(
         "/a/photo.png",
-        media_type=MediaType.image,
+        file_category="image",
         meta={"width": 1000, "height": 1000},
         prior_meta={},
         source_hash="abc123",
@@ -91,7 +90,7 @@ def test_ocr_metadata_scanned_pdf_uses_raster_path(monkeypatch):
     monkeypatch.setattr(ocr_run, "run_ocr", fake_run_ocr)
     out = ocr_metadata(
         "/a/scan.pdf",
-        media_type=MediaType.document,
+        file_category="document",
         meta={"body_text": "", "pages": 3},
         prior_meta={},
         source_hash="h1",
@@ -108,7 +107,7 @@ def test_ocr_metadata_skips_pdf_with_text_layer(monkeypatch):
     )
     out = ocr_metadata(
         "/a/text.pdf",
-        media_type=MediaType.document,
+        file_category="document",
         meta={"body_text": "x" * 500},
         prior_meta={},
         source_hash="h",
@@ -125,7 +124,7 @@ def test_ocr_metadata_cache_hit_skips_tesseract(monkeypatch):
     prior = {"ocr_text": "cached", "ocr_source_hash": "same-hash"}
     out = ocr_metadata(
         "/a/photo.png",
-        media_type=MediaType.image,
+        file_category="image",
         meta={"width": 10, "height": 10},
         prior_meta=prior,
         source_hash="same-hash",
@@ -139,7 +138,7 @@ def test_ocr_metadata_reocr_when_hash_changed(monkeypatch):
     prior = {"ocr_text": "stale", "ocr_source_hash": "old-hash"}
     out = ocr_metadata(
         "/a/photo.png",
-        media_type=MediaType.image,
+        file_category="image",
         meta={"width": 10, "height": 10},
         prior_meta=prior,
         source_hash="new-hash",
@@ -156,7 +155,7 @@ def test_ocr_metadata_pixel_ceiling_skips(monkeypatch):
     )
     out = ocr_metadata(
         "/a/huge.png",
-        media_type=MediaType.image,
+        file_category="image",
         meta={"width": 10_000, "height": 10_000},
         prior_meta={},
         source_hash="h",
@@ -172,7 +171,7 @@ def test_ocr_metadata_timeout_degrades(monkeypatch):
     monkeypatch.setattr(ocr_run, "run_ocr", timeout)
     out = ocr_metadata(
         "/a/photo.png",
-        media_type=MediaType.image,
+        file_category="image",
         meta={"width": 10, "height": 10},
         prior_meta={},
         source_hash="h",
@@ -186,7 +185,7 @@ def test_ocr_metadata_output_cap(monkeypatch):
     monkeypatch.setattr(ocr_run, "run_ocr", lambda *a, **k: "y" * 50)
     out = ocr_metadata(
         "/a/photo.png",
-        media_type=MediaType.image,
+        file_category="image",
         meta={"width": 10, "height": 10},
         prior_meta={},
         source_hash="h",
@@ -198,7 +197,7 @@ def test_ocr_metadata_output_cap(monkeypatch):
 def test_ocr_metadata_ineligible_returns_empty():
     out = ocr_metadata(
         "/a/song.mp3",
-        media_type=MediaType.audio,
+        file_category="audio",
         meta={},
         prior_meta={},
         source_hash="h",

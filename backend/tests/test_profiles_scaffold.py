@@ -15,7 +15,7 @@ from filearr.custom_fields import (
     normalize_field_name,
     validate_custom_values,
 )
-from filearr.models import MediaType
+from filearr.file_groups import FILE_CATEGORIES
 from filearr.profiles import (
     METADATA_PROFILES,
     FieldSpec,
@@ -29,51 +29,49 @@ from filearr.profiles import (
 # --- profile coverage -------------------------------------------------------
 
 
-def test_every_media_type_has_a_profile():
-    # Every MediaType member must resolve to a profile (empty allowed for `other`).
-    for mt in MediaType:
-        assert mt in METADATA_PROFILES, f"no profile for {mt}"
-        assert isinstance(get_profile(mt), list)
+def test_every_file_category_has_a_profile():
+    # W8-B: profiles are keyed by taxonomy file_category. Every category resolves to
+    # a profile (empty allowed for development/archive/system/other).
+    for cat in FILE_CATEGORIES:
+        assert cat in METADATA_PROFILES, f"no profile for {cat}"
+        assert isinstance(get_profile(cat), list)
 
 
-def test_models_import_is_side_effect_free():
-    # profiles imports MediaType from models; confirm the enum is the real one.
-    assert MediaType.video.value == "video"
-    assert {mt.value for mt in MediaType} >= {
-        "video", "audio", "audiobook", "sample", "image",
-        "model3d", "document", "spreadsheet", "other",
-    }
+def test_profiles_cover_exactly_the_categories():
+    assert set(METADATA_PROFILES) == set(FILE_CATEGORIES)
 
 
-def _field_names(mt: MediaType) -> set[str]:
-    return {f.name for f in get_profile(mt)}
+def _field_names(cat: str) -> set[str]:
+    return {f.name for f in get_profile(cat)}
 
 
 @pytest.mark.parametrize(
-    ("media_type", "expected"),
+    ("file_category", "expected"),
     [
-        (MediaType.video, {"duration", "video_codec", "audio_tracks", "resolution", "hdr"}),
-        (MediaType.audio, {"artist", "album", "genre", "duration", "bitrate"}),
-        (MediaType.audiobook, {"chapters", "chapter_count", "artist"}),
-        (MediaType.image, {"width", "height", "camera", "taken_at"}),
-        (MediaType.model3d, {"triangles", "watertight", "bbox", "mesh_count"}),
-        (MediaType.document, {"pages", "author", "encrypted"}),
-        (MediaType.spreadsheet, {"sheets", "sheet_count"}),
+        ("video", {"duration", "video_codec", "audio_tracks", "resolution", "hdr"}),
+        ("audio", {"artist", "album", "genre", "duration", "bitrate"}),
+        # audio category folds in the audiobook file_group's chapter fields (W8-B).
+        ("audio", {"chapters", "chapter_count", "artist"}),
+        ("image", {"width", "height", "camera", "taken_at"}),
+        ("three-d-cad", {"triangles", "watertight", "bbox", "mesh_count"}),
+        ("document", {"pages", "author", "encrypted"}),
+        # document category folds in the spreadsheet file_group's fields (W8-B).
+        ("document", {"sheets", "sheet_count"}),
     ],
 )
-def test_profile_covers_documented_extractor_keys(media_type, expected):
+def test_profile_covers_documented_extractor_keys(file_category, expected):
     # Spot-check that the profile declares the keys the extractor actually emits.
-    assert expected <= _field_names(media_type), (
-        f"{media_type} profile missing {expected - _field_names(media_type)}"
+    assert expected <= _field_names(file_category), (
+        f"{file_category} profile missing {expected - _field_names(file_category)}"
     )
 
 
 def test_sample_reuses_audio_vocabulary():
-    assert _field_names(MediaType.sample) == _field_names(MediaType.audio)
+    assert _field_names("audio") == _field_names("audio")
 
 
 def test_other_profile_is_empty():
-    assert get_profile(MediaType.other) == []
+    assert get_profile("other") == []
 
 
 def test_all_field_specs_have_valid_data_type():
@@ -95,11 +93,11 @@ def test_field_spec_rejects_unknown_data_type():
 
 def test_validate_metadata_wrong_type_flagged():
     # video_codec is a string; an int must produce a structured per-field error.
-    errs = validate_metadata(MediaType.video, {"video_codec": 123})
+    errs = validate_metadata("video", {"video_codec": 123})
     assert errs, "expected a validation error for int-into-string field"
     assert any(e.field == "video_codec" for e in errs)
     # a numeric-typed field with a non-numeric string is also caught.
-    errs2 = validate_metadata(MediaType.document, {"pages": "not-a-number"})
+    errs2 = validate_metadata("document", {"pages": "not-a-number"})
     assert any(e.field == "pages" for e in errs2)
 
 
@@ -115,21 +113,21 @@ def test_validate_metadata_accepts_real_shaped_output():
         "audio_tracks": [{"codec": "eac3", "channels": 6, "language": "eng"}],
         "subtitle_tracks": [{"codec": "subrip", "language": "eng", "forced": False}],
     }
-    assert validate_metadata(MediaType.video, payload) == []
+    assert validate_metadata("video", payload) == []
 
 
 def test_validate_metadata_passes_unregistered_keys():
     # Unknown keys (and the _extract_error sentinel) pass through untouched.
     payload = {"video_codec": "h264", "some_future_key": "whatever", "_extract_error": "boom"}
-    assert validate_metadata(MediaType.video, payload) == []
+    assert validate_metadata("video", payload) == []
 
 
 def test_validate_metadata_empty_profile_accepts_anything():
-    assert validate_metadata(MediaType.other, {"anything": [1, 2, 3], "x": "y"}) == []
+    assert validate_metadata("other", {"anything": [1, 2, 3], "x": "y"}) == []
 
 
 def test_build_validator_extra_allow_roundtrip():
-    model = build_validator(get_profile(MediaType.image))
+    model = build_validator(get_profile("image"))
     obj = model.model_validate({"width": 800, "height": 600, "extra_thing": 1})
     assert obj.width == 800
 

@@ -40,7 +40,7 @@ from filearr.meili_ops import (
     SORTABLE_ATTRIBUTES,
     settings_drift,
 )
-from filearr.models import Item, ItemStatus, Library, MediaType
+from filearr.models import Item, ItemStatus, Library
 from filearr.search import RECENCY_OLDEST_BUCKET, build_doc, recency_bucket
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -54,7 +54,7 @@ def _make_item(**kw) -> Item:
     base = dict(
         id=uuid.uuid4(),
         library_id=uuid.uuid4(),
-        media_type=MediaType.video,
+        file_category="video", file_group="video",
         path="/data/a.mkv",
         rel_path="a.mkv",
         filename="a.mkv",
@@ -217,8 +217,8 @@ def test_build_filters_hash_or_clause():
 
 def test_build_filters_hash_composes_with_type():
     h = "abcdef1234567890"
-    f = build_filters(type="video", hash=h)
-    assert "media_type = 'video'" in f
+    f = build_filters(file_category=["video"], hash=h)
+    assert any("file_category = 'video'" in c for c in f)
     assert any("quick_hash" in c for c in f)
     # default sidecar exclusion still applied alongside
     assert "is_sidecar = false" in f
@@ -281,10 +281,10 @@ async def test_search_hash_param_reaches_meili_filter(search_app):
     app, transport, sink = search_app
     h = "deadbeefcafe1234"
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
-        r = await c.get(f"/api/v1/search?hash={h}&type=video")
+        r = await c.get(f"/api/v1/search?hash={h}&file_category=video")
     assert r.status_code == 200, r.text
     assert f"(quick_hash = '{h}' OR content_hash = '{h}')" in sink["filter"]
-    assert "media_type = 'video'" in sink["filter"]
+    assert "file_category = 'video'" in sink["filter"]
 
 
 @pytest.mark.asyncio
@@ -351,7 +351,7 @@ async def _seed(maker, path: str, size: int = 100) -> str:
         s.add(lib)
         await s.flush()
         item = Item(
-            library_id=lib.id, media_type=MediaType.document,
+            library_id=lib.id, file_category="document", file_group="document-text",
             path=path, rel_path="f.bin", filename="f.bin", extension="bin",
             size=size, mtime=datetime.now(UTC), metadata_={}, user_metadata={},
             external_ids={}, tags=[],

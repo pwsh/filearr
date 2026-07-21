@@ -69,7 +69,7 @@
   // The card component is resolved from the registry (a future/unregistered type
   // falls back to the generic key-facts card). Rendered via native Svelte-5
   // dynamic-component syntax below — no <svelte:component>.
-  const mediaType = $derived(str("media_type") ?? "");
+  const mediaType = $derived(str("file_category") ?? "");
   const CardComponent = $derived(cardFor(mediaType));
   const cardTabLabel = $derived(cardLabel(mediaType));
   type TabId = "card" | "raw";

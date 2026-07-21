@@ -24,7 +24,7 @@ from filearr import db as db_mod
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Agent, AgentShareMap, Item, Library, MediaType
+from filearr.models import Agent, AgentShareMap, Item, Library
 from filearr.share_resolution import resolve_item_share
 from filearr.transfers import ShareMapping
 
@@ -169,7 +169,7 @@ async def _seed_agent_item(maker, *, share_hint=None) -> tuple[str, str]:
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             path="movies/x.mp4",  # agent item: apply_batch sets path == rel_path
             rel_path="movies/x.mp4",
             filename="x.mp4",

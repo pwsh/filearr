@@ -28,7 +28,7 @@ from filearr.config import get_settings
 from filearr.custom_fields import CustomFieldDef
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import CustomField, Item, ItemStatus, Library, MediaType, ReportDefinition
+from filearr.models import CustomField, Item, ItemStatus, Library, ReportDefinition
 from filearr.query_sql import QueryTranslationError, ast_to_where
 from filearr.querydsl import ParseError, parse
 
@@ -84,7 +84,8 @@ async def _mk_item(maker, library_id, rel_path, **kw):
     async with maker() as s:
         item = Item(
             library_id=library_id,
-            media_type=kw.get("media_type", MediaType.other),
+            file_category=kw.get("file_category", "other"),
+            file_group=kw.get("file_group"),
             status=kw.get("status", ItemStatus.active),
             path=f"/data/l/{rel_path}",
             rel_path=rel_path,
@@ -125,15 +126,15 @@ async def test_translator_core_filters(env):
     _client, maker = env
     lib = await _mk_lib(maker)
     old = datetime.now(UTC) - timedelta(days=400)
-    await _mk_item(maker, lib, "Movies/a.mkv", media_type=MediaType.video,
+    await _mk_item(maker, lib, "Movies/a.mkv", file_category="video", file_group="video",
                    extension="mkv", size=5_000_000_000, tags=["keep"],
                    quick_hash="deadbeef", content_hash="cafe1234",
                    metadata={"height": 1080, "video_codec": "hevc", "bitrate": 6_000_000},
                    title="Alpha")
-    await _mk_item(maker, lib, "Music/b.mp3", media_type=MediaType.audio,
+    await _mk_item(maker, lib, "Music/b.mp3", file_category="audio", file_group="audio-lossy",
                    extension="mp3", size=3_000_000, tags=["archived"],
                    metadata={"bitrate": 128000})
-    await _mk_item(maker, lib, "Movies/c.mp4", media_type=MediaType.video,
+    await _mk_item(maker, lib, "Movies/c.mp4", file_category="video", file_group="video",
                    extension="mp4", size=700_000, mtime=old,
                    metadata={"height": 480, "video_codec": "mpeg4", "bitrate": 500000})
 
@@ -149,6 +150,28 @@ async def test_translator_core_filters(env):
     assert await _matches(maker, "alpha") == {"Movies/a.mkv"}
     # negation
     assert await _matches(maker, "kind:video -tag:keep") == {"Movies/c.mp4"}
+
+
+async def test_translator_group_filter(env):
+    """W8-D: the ``group:`` keyword maps to ``file_group`` (mirrors ``kind:``)."""
+    _client, maker = env
+    lib = await _mk_lib(maker)
+    await _mk_item(maker, lib, "Photos/a.cr2", file_category="image",
+                   file_group="raw-photo", extension="cr2")
+    await _mk_item(maker, lib, "Photos/b.jpg", file_category="image",
+                   file_group="raster-photo", extension="jpg")
+    await _mk_item(maker, lib, "Archives/c.zip", file_category="archive",
+                   file_group="archive", extension="zip")
+
+    # group:raw-photo -> Item.file_group == "raw-photo"
+    assert await _matches(maker, "group:raw-photo") == {"Photos/a.cr2"}
+    # uppercase value is lower-cased on parse, still matches
+    assert await _matches(maker, "group:RAW-PHOTO") == {"Photos/a.cr2"}
+    # negation excludes the group
+    assert await _matches(maker, "-group:raw-photo") == {"Photos/b.jpg", "Archives/c.zip"}
+    # an unknown group is a translation error (validated against FILE_GROUPS)
+    with pytest.raises(QueryTranslationError):
+        ast_to_where(parse("group:bogus"), {})
 
 
 async def test_translator_time_filters(env):
@@ -171,10 +194,10 @@ async def test_translator_time_filters(env):
 async def test_translator_meta_and_cf(env):
     _client, maker = env
     lib = await _mk_lib(maker)
-    await _mk_item(maker, lib, "hd.mkv", media_type=MediaType.video,
+    await _mk_item(maker, lib, "hd.mkv", file_category="video", file_group="video",
                    metadata={"resolution": "1080p", "height": 1080, "bitrate": 6_000_000},
                    user_metadata={"rating": 5, "status": "keep"})
-    await _mk_item(maker, lib, "sd.mkv", media_type=MediaType.video,
+    await _mk_item(maker, lib, "sd.mkv", file_category="video", file_group="video",
                    metadata={"resolution": "480p", "height": 480, "bitrate": 500000},
                    user_metadata={"rating": 2, "status": "archived"})
     defs = {
@@ -240,9 +263,12 @@ async def _mk_cf(maker, name, data_type="integer"):
 async def test_create_and_run_json_roundtrip(env):
     client, maker = env
     lib = await _mk_lib(maker)
-    await _mk_item(maker, lib, "Movies/a.mkv", media_type=MediaType.video,
+    await _mk_item(maker, lib, "Movies/a.mkv", file_category="video", file_group="video",
                    size=5_000_000_000, metadata={"height": 1080})
-    await _mk_item(maker, lib, "Music/b.mp3", media_type=MediaType.audio, size=3_000_000)
+    await _mk_item(
+        maker, lib, "Music/b.mp3", file_category="audio", file_group="audio-lossy",
+        size=3_000_000,
+    )
 
     r = await client.post("/api/v1/custom-reports", json={
         "name": "videos",
@@ -346,8 +372,8 @@ async def test_run_csv_streams_and_guards_formula(env):
     client, maker = env
     lib = await _mk_lib(maker)
     # a filename beginning with '=' must be neutralised in CSV output
-    await _mk_item(maker, lib, "=danger.mkv", media_type=MediaType.video, size=10)
-    await _mk_item(maker, lib, "safe.mkv", media_type=MediaType.video, size=20)
+    await _mk_item(maker, lib, "=danger.mkv", file_category="video", file_group="video", size=10)
+    await _mk_item(maker, lib, "safe.mkv", file_category="video", file_group="video", size=20)
     r = await client.post("/api/v1/custom-reports", json={
         "name": "csvrep", "query": "kind:video", "columns": ["rel_path", "size"]})
     rid = r.json()["id"]
@@ -380,7 +406,7 @@ async def test_run_csv_streams_and_guards_formula(env):
 async def test_custom_run_json_rows_include_item_id(env):
     client, maker = env
     lib = await _mk_lib(maker)
-    fid = await _mk_item(maker, lib, "a.mkv", media_type=MediaType.video, size=10)
+    fid = await _mk_item(maker, lib, "a.mkv", file_category="video", file_group="video", size=10)
     r = await client.post("/api/v1/custom-reports", json={
         "name": "vids", "query": "kind:video", "columns": ["rel_path", "size"]})
     rid = r.json()["id"]
@@ -396,7 +422,7 @@ async def test_custom_path_context_columns(env):
     lib = await _mk_lib(
         maker, native_prefix="/mnt/user/media", share_prefix="smb://tower/media"
     )
-    await _mk_item(maker, lib, "Movies/a.mkv", media_type=MediaType.video, size=10)
+    await _mk_item(maker, lib, "Movies/a.mkv", file_category="video", file_group="video", size=10)
     # native_path + share_url are computed core columns now
     cols = (await client.get("/api/v1/custom-reports/columns")).json()
     assert "native_path" in cols["core"] and "share_url" in cols["core"]
@@ -419,8 +445,8 @@ async def test_custom_ndjson_and_xml_exports(env):
 
     client, maker = env
     lib = await _mk_lib(maker)
-    await _mk_item(maker, lib, "a.mkv", media_type=MediaType.video, size=10)
-    await _mk_item(maker, lib, "b.mkv", media_type=MediaType.video, size=20)
+    await _mk_item(maker, lib, "a.mkv", file_category="video", file_group="video", size=10)
+    await _mk_item(maker, lib, "b.mkv", file_category="video", file_group="video", size=20)
     r = await client.post("/api/v1/custom-reports", json={
         "name": "exp", "query": "kind:video", "columns": ["rel_path", "size"]})
     rid = r.json()["id"]
@@ -440,7 +466,7 @@ async def test_custom_ndjson_and_xml_exports(env):
 async def test_custom_bad_format_422(env):
     client, maker = env
     lib = await _mk_lib(maker)
-    await _mk_item(maker, lib, "a.mkv", media_type=MediaType.video)
+    await _mk_item(maker, lib, "a.mkv", file_category="video", file_group="video")
     r = await client.post("/api/v1/custom-reports", json={
         "name": "x", "query": "kind:video", "columns": ["rel_path"]})
     rid = r.json()["id"]

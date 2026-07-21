@@ -142,12 +142,14 @@ func TestScanPreflightDeadRoot(t *testing.T) {
 	}
 }
 
-func TestScanEnabledTypesGating(t *testing.T) {
+func TestScanEnabledCategoriesGating(t *testing.T) {
 	root := t.TempDir()
 	mktree(t, root, []string{"movie.mp4", "song.flac", "movie.nfo"})
 	st := newStore(t)
-	// Only video enabled: song.flac excluded, but movie.nfo (sidecar) still ingested.
-	r := mustScan(t, st, Options{Root: root, EnabledTypes: []string{"video"}})
+	// Only the video CATEGORY enabled (W8-E taxonomy gate; nil Taxonomy => seed
+	// classifier): song.flac (audio) excluded, but movie.nfo (sidecar) still
+	// ingested. .mp4 -> video, .flac -> audio in the seed taxonomy.
+	r := mustScan(t, st, Options{Root: root, EnabledCategories: []string{"video"}})
 	items := loadByRel(t, st, r.RootID)
 	if _, ok := items["movie.mp4"]; !ok {
 		t.Error("video should be ingested")
@@ -156,7 +158,26 @@ func TestScanEnabledTypesGating(t *testing.T) {
 		t.Error("audio should be gated out when only video enabled")
 	}
 	if _, ok := items["movie.nfo"]; !ok {
-		t.Error("sidecar must bypass the enabled-types gate")
+		t.Error("sidecar must bypass the enabled-categories gate")
+	}
+	if it := items["movie.mp4"]; it.FileCategory != "video" || it.FileGroup != "video" {
+		t.Errorf("movie.mp4 should classify as (video, video), got (%q, %q)", it.FileCategory, it.FileGroup)
+	}
+}
+
+func TestScanEnabledGroupsGating(t *testing.T) {
+	root := t.TempDir()
+	mktree(t, root, []string{"movie.mp4", "song.flac"})
+	st := newStore(t)
+	// Enabling a GROUP (audio-lossless) admits .flac while excluding .mp4 (video),
+	// exercising the OR-of-category-or-group inclusion rule.
+	r := mustScan(t, st, Options{Root: root, EnabledGroups: []string{"audio-lossless"}})
+	items := loadByRel(t, st, r.RootID)
+	if _, ok := items["song.flac"]; !ok {
+		t.Error("audio-lossless group should be ingested")
+	}
+	if _, ok := items["movie.mp4"]; ok {
+		t.Error("video should be gated out when only the audio-lossless group is enabled")
 	}
 }
 

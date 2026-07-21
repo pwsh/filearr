@@ -61,6 +61,14 @@ MAX_PATH_LEN = 4096
 MAX_REGEX_LEN = 4096
 MAX_COLLECTORS = 64
 MAX_COLLECTOR_LEN = 128
+# --- W7 permissions-collector config caps (docs/research/permissions-*.md §4) --
+#: ``exclude_principals`` reuses the collectors list's count/length posture (§4).
+MAX_EXCLUDE_PRINCIPALS = MAX_COLLECTORS
+MAX_EXCLUDE_PRINCIPAL_LEN = MAX_COLLECTOR_LEN
+#: ``watch_paths`` mirrors ``ScanSelection.paths`` (count + MAX_PATH_LEN + balance).
+MAX_WATCH_PATHS = MAX_PATHS_PER_SELECTION
+#: Per-path snapshot-history depth bound (``retain_snapshots``, §5 retention).
+MAX_RETAIN_SNAPSHOTS = 1000
 
 
 class GroupSettingsValidationError(ValueError):
@@ -156,15 +164,97 @@ class ScanSelection(BaseModel):
         return _validate_regex_list(v, "exclude_regex")
 
 
+class AuditConfig(BaseModel):
+    """Change-audit knobs for the ``permissions`` collector (W7, brief §5).
+
+    Gates the (agent-side, scaffold) snapshot-diff + alert routing. Central
+    VALIDATES + STORES this ahead of the collector; nothing consumes it yet (the
+    collector + diff ingestion are agent-side/W7-T6+ scaffold). Default OFF."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    retain_snapshots: int = 10  # per-path snapshot-history depth, bounded
+    alert_on_change: bool = False
+    watch_paths: list[str] = Field(default_factory=list)  # path specs, syntax-only
+
+    @field_validator("retain_snapshots")
+    @classmethod
+    def _valid_retain(cls, v: int) -> int:
+        if v < 1 or v > MAX_RETAIN_SNAPSHOTS:
+            raise ValueError(f"retain_snapshots must be 1..{MAX_RETAIN_SNAPSHOTS}")
+        return v
+
+    @field_validator("watch_paths")
+    @classmethod
+    def _valid_watch_paths(cls, v: list[str]) -> list[str]:
+        if len(v) > MAX_WATCH_PATHS:
+            raise ValueError(f"watch_paths has {len(v)}; max {MAX_WATCH_PATHS}")
+        for i, spec in enumerate(v):
+            if not isinstance(spec, str) or not spec.strip():
+                raise ValueError(f"watch_paths[{i}] must be a non-empty path spec")
+            if len(spec) > MAX_PATH_LEN:
+                raise ValueError(f"watch_paths[{i}] exceeds {MAX_PATH_LEN} chars")
+            _check_balanced(spec)
+        return v
+
+
+class PermissionsConfig(BaseModel):
+    """Detailed knobs for the ``permissions`` collector (W7, brief §4).
+
+    Sibling to :attr:`InventoryConfig.collectors`: only takes effect when
+    ``"permissions"`` is ALSO named in ``inventory.collectors`` (defense in
+    depth — an admin must both name the collector and configure it). This block
+    is ADDITIVE + validated so an operator can author config ahead of the
+    collector, but nothing runs yet — the consuming collector is agent-side
+    scaffold. Exclusion defaults (``exclude_well_known=True`` /
+    ``include_inherited=False``) make a first-run report highlight only explicit,
+    non-baseline grants; ``include_effective_access`` is reserved for v2 (§3.5)
+    and is a no-op until shipped. Default OFF (opt-in)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    resolve_names: bool = True  # best-effort SID/uid -> display name
+    include_inherited: bool = False  # explicit/non-inherited ACEs only by default
+    include_effective_access: bool = False  # reserved v2; agent no-ops until shipped
+    exclude_well_known: bool = True  # SYSTEM/Administrators/root/Everyone/CREATOR OWNER
+    exclude_principals: list[str] = Field(default_factory=list)  # canonical_id strings
+    collect_share_acls: bool = False  # optional Windows-only share-level ACL (§2.1)
+    audit: AuditConfig | None = None
+
+    @field_validator("exclude_principals")
+    @classmethod
+    def _valid_exclude_principals(cls, v: list[str]) -> list[str]:
+        if len(v) > MAX_EXCLUDE_PRINCIPALS:
+            raise ValueError(
+                f"exclude_principals has {len(v)}; max {MAX_EXCLUDE_PRINCIPALS}"
+            )
+        for i, name in enumerate(v):
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError(f"exclude_principals[{i}] must be a non-empty string")
+            if len(name) > MAX_EXCLUDE_PRINCIPAL_LEN:
+                raise ValueError(
+                    f"exclude_principals[{i}] exceeds {MAX_EXCLUDE_PRINCIPAL_LEN} chars"
+                )
+        return v
+
+
 class InventoryConfig(BaseModel):
     """Per-group inventory-collector toggle (W6-D2). ``collectors`` are FREE
     strings (W6-D3 defines the vocabulary; central does NOT hard-code it) — only
-    length/count-capped so a hostile/buggy payload cannot bloat the row."""
+    length/count-capped so a hostile/buggy payload cannot bloat the row.
+
+    ``permissions`` (W7) is the optional detailed config for the ``permissions``
+    collector, a typed sibling to the free-string ``collectors`` list (which
+    carries no config payload) — mirroring how ``scan_selections`` is its own
+    typed field, not shoehorned into a string list. Optional/None = absent."""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     collectors: list[str] = Field(default_factory=list)
+    permissions: PermissionsConfig | None = None
 
     @field_validator("collectors")
     @classmethod

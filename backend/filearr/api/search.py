@@ -3,13 +3,16 @@ opaque cursor pagination wrapping the engine's offset model."""
 
 import base64
 import json
+import logging
 import re
 
 from fastapi import APIRouter, Depends, Query, Request
+from meilisearch_python_sdk.errors import MeilisearchApiError
 from meilisearch_python_sdk.models.search import Hybrid
 
 from filearr.config import get_settings
 from filearr.embed import embed_query
+from filearr.file_groups import FILE_CATEGORIES, FILE_GROUPS
 from filearr.meili_ops import DEFAULT_EMBEDDER_NAME
 from filearr.schemas import SearchResponse
 from filearr.search import client
@@ -17,7 +20,24 @@ from filearr.security import require_search_scope
 
 router = APIRouter()
 
+log = logging.getLogger("filearr.search")
+
 PAGE_SIZE = 50
+
+
+def _is_facet_unavailable(err: MeilisearchApiError) -> bool:
+    """True when a Meili search failed only because a REQUESTED facet is not (yet)
+    filterable on the index.
+
+    This is the transient window after a new facet-able attribute is added to
+    ``FILTERABLE_ATTRIBUTES``: ``ensure_index()`` applies the setting at boot, but
+    Meilisearch re-indexes the whole corpus before the attribute becomes
+    facetable, and on a large index that takes minutes. A facet request during
+    that window must degrade (drop facet COUNTS) rather than 500 the entire search
+    — losing counts briefly is fine; losing all results is a deploy blocker
+    (regression found live 2026-07-18 when ``file_group`` shipped)."""
+    code = getattr(err, "code", "") or ""
+    return code == "invalid_search_facets" or "not filterable" in str(err).lower()
 
 # Facets requested on every search. ``size``/``mtime`` are here only so Meili
 # returns their ``facetStats`` (min/max) — the P3-T4 range sliders derive their
@@ -25,7 +45,8 @@ PAGE_SIZE = 50
 # facet-search-disabled (meili_ops.FACET_SEARCH_DISABLED), so requesting them as
 # facets is cheap: we consume the stats, not the (near-unique) value distribution.
 FACETS = [
-    "media_type",
+    "file_category",
+    "file_group",
     "extension",
     "year",
     "tags",
@@ -70,7 +91,8 @@ HASH_RE = re.compile(r"^[0-9a-f]{8,64}$")
 
 def build_filters(
     *,
-    type: str | None = None,
+    file_category: list[str] | None = None,
+    file_group: list[str] | None = None,
     library: str | None = None,
     status: str | None = "active",
     extension: str | None = None,
@@ -99,8 +121,26 @@ def build_filters(
         # Exact match against either digest column; typo tolerance is disabled on
         # both (HASH_ATTRIBUTES), so a one-hex-digit difference matches nothing.
         filters.append(f"(quick_hash = '{hash}' OR content_hash = '{hash}')")
-    if type:
-        filters.append(f"media_type = '{type}'")
+    if file_category:
+        # W8-A: repeatable => OR (a file has exactly one category). Every value is
+        # validated against the controlled ``FILE_CATEGORIES`` vocabulary BEFORE it
+        # is interpolated (same injection-safe posture as ``file_group``/``hash``).
+        # Unknown values are dropped.
+        valid_cats = [c for c in file_category if c in FILE_CATEGORIES]
+        if valid_cats:
+            filters.append(
+                "(" + " OR ".join(f"file_category = '{c}'" for c in valid_cats) + ")"
+            )
+    if file_group:
+        # Repeatable => OR semantics (a file has exactly one group). Every value is
+        # validated against the controlled ``FILE_GROUPS`` vocabulary BEFORE it is
+        # interpolated, so no user input reaches the Meili filter unchecked (same
+        # defense-in-depth posture as the hash filter). Unknown values are dropped.
+        valid = [g for g in file_group if g in FILE_GROUPS]
+        if valid:
+            filters.append(
+                "(" + " OR ".join(f"file_group = '{g}'" for g in valid) + ")"
+            )
     if library:
         filters.append(f"library_id = '{library}'")
     if status:
@@ -161,7 +201,19 @@ def _shape_hit(hit: dict) -> dict:
 async def search(
     request: Request,
     q: str = "",
-    type: str | None = Query(default=None, description="media type filter"),
+    file_category: list[str] | None = Query(
+        default=None,
+        description="file-category filter (repeatable = OR); the coarse, extension-"
+        "derived parent of file_group (the authoritative type filter, successor to "
+        "the removed media_type). See GET /taxonomy for the vocabulary. Unknown "
+        "values are ignored.",
+    ),
+    file_group: list[str] | None = Query(
+        default=None,
+        description="file-group filter (repeatable = OR); the finer, extension-"
+        "derived similarity bucket. See GET /system/file-groups for the vocabulary. "
+        "Unknown values are ignored.",
+    ),
     library: str | None = None,
     status: str | None = Query(default="active"),
     extension: str | None = None,
@@ -217,7 +269,8 @@ async def search(
     scope_filter: str | None = Depends(require_search_scope("read")),
 ) -> SearchResponse:
     filters = build_filters(
-        type=type,
+        file_category=file_category,
+        file_group=file_group,
         library=library,
         status=status,
         extension=extension,
@@ -255,25 +308,38 @@ async def search(
         vector = embed_query(q)
         hybrid = Hybrid(semantic_ratio=semantic, embedder=DEFAULT_EMBEDDER_NAME)
 
+    search_kwargs = dict(
+        filter=" AND ".join(filters) if filters else None,
+        offset=offset,
+        limit=limit,
+        sort=[sort_expr] if sort_expr else None,
+        hybrid=hybrid,
+        vector=vector,
+        # P3-T5 snippets/highlighting. body_text is cropped to a short window;
+        # title/filename get inline markers. Custom <em>/</em> tags (also the
+        # SDK default) are the only markup Meili injects.
+        attributes_to_highlight=HIGHLIGHT_ATTRS,
+        attributes_to_crop=CROP_ATTRS,
+        crop_length=CROP_LENGTH,
+        highlight_pre_tag=HIGHLIGHT_PRE,
+        highlight_post_tag=HIGHLIGHT_POST,
+    )
     async with client() as c:
-        result = await c.index(s.meili_index).search(
-            q,
-            filter=" AND ".join(filters) if filters else None,
-            facets=FACETS,
-            offset=offset,
-            limit=limit,
-            sort=[sort_expr] if sort_expr else None,
-            hybrid=hybrid,
-            vector=vector,
-            # P3-T5 snippets/highlighting. body_text is cropped to a short window;
-            # title/filename get inline markers. Custom <em>/</em> tags (also the
-            # SDK default) are the only markup Meili injects.
-            attributes_to_highlight=HIGHLIGHT_ATTRS,
-            attributes_to_crop=CROP_ATTRS,
-            crop_length=CROP_LENGTH,
-            highlight_pre_tag=HIGHLIGHT_PRE,
-            highlight_post_tag=HIGHLIGHT_POST,
-        )
+        index = c.index(s.meili_index)
+        try:
+            result = await index.search(q, facets=FACETS, **search_kwargs)
+        except MeilisearchApiError as err:
+            # A newly-added facet still re-indexing must not take down search:
+            # retry once WITHOUT facet distribution (results survive; counts drop
+            # until the reindex completes). Any other API error is a real fault.
+            if not _is_facet_unavailable(err):
+                raise
+            log.warning(
+                "search facets unavailable (%s); serving without facet counts — a "
+                "newly-added filterable attribute is likely still re-indexing",
+                getattr(err, "code", "?"),
+            )
+            result = await index.search(q, facets=None, **search_kwargs)
 
     total = result.estimated_total_hits or 0
     next_cursor = _encode_cursor(offset + limit) if offset + limit < total else None
@@ -290,7 +356,12 @@ async def search(
             audit.SEARCH,
             request=request,
             principal_id=audit.actor_id(request),
-            details={"q": q, "type": type, "library": library, "total": total},
+            details={
+                "q": q,
+                "file_category": file_category,
+                "library": library,
+                "total": total,
+            },
         )
     return SearchResponse(
         hits=[_shape_hit(h) for h in result.hits],
@@ -314,7 +385,9 @@ async def search(
 @router.get("/search/tags")
 async def search_tags(
     q: str = Query(default="", description="tag prefix/substring to complete"),
-    type: str | None = Query(default=None, description="scope suggestions to a media type"),
+    file_category: list[str] | None = Query(
+        default=None, description="scope suggestions to one or more file categories"
+    ),
     library: str | None = None,
     status: str | None = Query(default="active"),
     limit: int = Query(default=20, ge=1, le=50),
@@ -327,7 +400,7 @@ async def search_tags(
     empty ``q`` returns the top tags in the (optionally scoped) corpus."""
     # Optional scope context — build_filters excludes sidecars by default and adds
     # the equality clauses; the tag facet counts then reflect that scope.
-    filters = build_filters(type=type, library=library, status=status)
+    filters = build_filters(file_category=file_category, library=library, status=status)
     # P6-T3: apply the caller's RBAC scope filter to the facet counts too, so tag
     # suggestions never leak values that live only under un-granted paths.
     if scope_filter:

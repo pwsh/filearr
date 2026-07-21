@@ -131,8 +131,16 @@ ignore = ["B008"]
 # rbac.py's `Role(str, enum.Enum)` follows the same deliberate str-mixin pattern
 # (Phase 6 global-role enum; serializes like the other enums when wired in).
 "filearr/rbac.py" = ["UP042"]
+# permissions.py's normalized vocabularies (Verb/Fidelity/AceType/...) follow the
+# same deliberate str-mixin pattern: they serialize to JSON strings in the
+# permission-record model dumped to the (future) permission_snapshots JSONB, and
+# `str(member)` semantics are load-bearing exactly as in models.py.
+"filearr/permissions.py" = ["UP042"]
 # Long extension-map data rows read better on one line than wrapped.
 "filearr/media_types.py" = ["E501"]
+# file_groups.py: same rationale — the extension-group data tuples and the
+# generated-doc intro string are long data rows better left unwrapped.
+"filearr/file_groups.py" = ["E501"]
 # Alembic scaffolding: env.py import ordering.
 "alembic/env.py" = ["I001"]
 # init_db inserts BACKEND_DIR on sys.path *before* importing `filearr`, so its

@@ -309,10 +309,18 @@ async def test_assign_unknown_group_404(client):
 async def test_null_group_no_section_and_plain_etag(client):
     c, maker, _ = client
     agent_id, fp = await _seed_agent(maker)
+    async with maker() as s:
+        tv = int(
+            (
+                await s.execute(text("SELECT version FROM taxonomy_state WHERE id = 1"))
+            ).scalar_one()
+        )
     r = await c.get(f"/api/v1/agents/{agent_id}/policy", headers=_auth(fp))
-    assert r.json()["policy"] == {}
+    # No config group => no `group` section (only the W8-E computed taxonomy_version).
+    assert r.json()["policy"] == {"taxonomy_version": tv}
     assert "group" not in r.json()["policy"]
-    assert r.headers["etag"] == '"none/0"'  # unchanged pre-W6 form
+    # No /g: group segment in the ETag; the W8-E /t:<v> taxonomy segment is present.
+    assert r.headers["etag"] == f'"none/0/t:{tv}"'
 
 
 async def test_group_settings_appear_under_group(client):

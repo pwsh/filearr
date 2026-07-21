@@ -28,12 +28,12 @@ func perr(pos int, code, reason string) *ParseError {
 // --- Vocabulary (mirrors querydsl.py) --------------------------------------
 
 var keys = map[string]bool{
-	"kind": true, "ext": true, "size": true, "modified": true,
+	"kind": true, "group": true, "ext": true, "size": true, "modified": true,
 	"created": true, "path": true, "tag": true, "hash": true,
 }
 
 var (
-	lowerKeys = map[string]bool{"kind": true, "ext": true, "hash": true}
+	lowerKeys = map[string]bool{"kind": true, "group": true, "ext": true, "hash": true}
 	listKeys  = map[string]bool{"ext": true}
 	sizeKeys  = map[string]bool{"size": true}
 	timeKeys  = map[string]bool{"modified": true, "created": true}
@@ -332,7 +332,7 @@ func parseFilterValue(key, val string, pos int) (Value, *ParseError) {
 	if timeKeys[key] {
 		return parseTime(val, pos)
 	}
-	return StringValue{Value: val}, nil // kind / path / tag
+	return StringValue{Value: val}, nil // kind / group / path / tag
 }
 
 // parseToken parses one lexed token into a *Term or *Filter (or nil for an empty

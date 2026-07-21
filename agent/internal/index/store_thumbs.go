@@ -7,11 +7,12 @@ import (
 	"github.com/filearr/filearr/agent/internal/thumbs"
 )
 
-// thumbnailableMediaTypes are the media_type values the P12-T13 pass generates
-// for (image + audio family + video). Mirrors thumbs.isThumbnailable; document
-// (PDF) is deliberately excluded on the agent (no production-grade pure-Go PDF
-// rasterization under CGO_ENABLED=0).
-var thumbnailableMediaTypes = []any{"image", "video", "audio", "audiobook", "sample"}
+// thumbnailableCategories are the file_category values the P12-T13 pass generates
+// for (image + audio + video). Mirrors thumbs.isThumbnailable; document (PDF) is
+// deliberately excluded on the agent (no production-grade pure-Go PDF
+// rasterization under CGO_ENABLED=0). The old audiobook/sample media types now
+// fall under the “audio“ category, so this triple covers them (W8-E).
+var thumbnailableCategories = []any{"image", "video", "audio"}
 
 // ThumbCandidates returns every active, non-sidecar, thumbnailable, hashed item
 // (joined to its scan-root absolute path) together with its linked sidecar
@@ -28,20 +29,20 @@ func (s *Store) ThumbCandidates(ctx context.Context) ([]thumbs.Candidate, error)
 	}
 
 	placeholders := ""
-	args := make([]any, 0, len(thumbnailableMediaTypes))
-	for i, mt := range thumbnailableMediaTypes {
+	args := make([]any, 0, len(thumbnailableCategories))
+	for i, cat := range thumbnailableCategories {
 		if i > 0 {
 			placeholders += ","
 		}
 		placeholders += "?"
-		args = append(args, mt)
+		args = append(args, cat)
 	}
 	q := `
-SELECT i.id, r.path, i.rel_path, i.media_type,
+SELECT i.id, r.path, i.rel_path, i.file_category,
        COALESCE(i.content_hash, ''), COALESCE(i.quick_hash, '')
 FROM items i JOIN roots r ON r.id = i.root_id
 WHERE i.status = 'active' AND i.is_sidecar = 0
-  AND i.media_type IN (` + placeholders + `)
+  AND i.file_category IN (` + placeholders + `)
   AND (i.content_hash IS NOT NULL OR i.quick_hash IS NOT NULL)`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
@@ -52,7 +53,7 @@ WHERE i.status = 'active' AND i.is_sidecar = 0
 	var out []thumbs.Candidate
 	for rows.Next() {
 		var c thumbs.Candidate
-		if err := rows.Scan(&c.ItemID, &c.RootPath, &c.RelPath, &c.MediaType, &c.ContentHash, &c.QuickHash); err != nil {
+		if err := rows.Scan(&c.ItemID, &c.RootPath, &c.RelPath, &c.FileCategory, &c.ContentHash, &c.QuickHash); err != nil {
 			return nil, err
 		}
 		c.SidecarRels = sidecars[c.ItemID]

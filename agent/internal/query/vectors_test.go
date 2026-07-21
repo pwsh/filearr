@@ -14,8 +14,9 @@ import (
 // (backend/filearr/querydsl.py). "ast" is the expected Query.ToDict(); "error"
 // is the expected ParseError (code + position are the contract; reason is
 // informational). The P11-T2 meta./cf. extension grew the file to 81 vectors;
-// this test asserts that count and targets the FILE, not the (stale) task doc.
-const expectedVectorCount = 81
+// W8-D added the group: keyword (4 vectors) -> 85. This test asserts that count
+// and targets the FILE, not the (stale) task doc.
+const expectedVectorCount = 85
 
 type vector struct {
 	Name  string         `json:"name"`

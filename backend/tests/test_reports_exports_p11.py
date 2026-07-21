@@ -34,7 +34,6 @@ from filearr.models import (
     AlertChannel,
     Item,
     Library,
-    MediaType,
     ReportExport,
     ReportSchedule,
 )
@@ -207,7 +206,7 @@ async def _seed(maker, n=3):
             s.add(
                 Item(
                     library_id=lib.id,
-                    media_type=MediaType.video,
+                    file_category="video", file_group="video",
                     status="active",
                     path=f"/data/l/f{i}.mp4",
                     rel_path=f"f{i}.mp4",
@@ -260,7 +259,7 @@ async def test_sync_xlsx_formula_guard(env):
         await s.commit()
         s.add(
             Item(
-                library_id=lib.id, media_type=MediaType.video, status="active",
+                library_id=lib.id, file_category="video", file_group="video", status="active",
                 path="/data/l/=danger.mp4", rel_path="=SUM(A1)", filename="=SUM(A1)",
                 extension="mp4", size=10, mtime=datetime.now(UTC), metadata_={},
                 user_metadata={}, external_ids={}, tags=[],

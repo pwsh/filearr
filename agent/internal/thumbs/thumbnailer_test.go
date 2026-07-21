@@ -73,11 +73,11 @@ func imageCandidate(t *testing.T, dir, name, hash string) Candidate {
 	t.Helper()
 	writePNGAt(t, dir, name, 200, 120)
 	return Candidate{
-		ItemID:      "item-" + name,
-		RootPath:    dir,
-		RelPath:     name,
-		MediaType:   mediaImage,
-		ContentHash: hash,
+		ItemID:       "item-" + name,
+		RootPath:     dir,
+		RelPath:      name,
+		FileCategory: categoryImage,
+		ContentHash:  hash,
 	}
 }
 
@@ -144,7 +144,7 @@ func TestRunPass_VideoSkippedWithoutFFmpeg(t *testing.T) {
 	dir := t.TempDir()
 	store := newFakeStore(Candidate{
 		ItemID: "v1", RootPath: dir, RelPath: "movie.mkv",
-		MediaType: mediaVideo, ContentHash: "vh",
+		FileCategory: categoryVideo, ContentHash: "vh",
 	})
 	up := &fakeUploader{stored: true}
 	// ffmpegPath defaults to "" -> video generation is skipped, never an error.
@@ -168,7 +168,7 @@ func TestRunPass_SidecarArtworkFirst(t *testing.T) {
 	writePNGAt(t, dir, "poster.jpg", 300, 200)
 	store := newFakeStore(Candidate{
 		ItemID: "v1", RootPath: dir, RelPath: "movie.mkv",
-		MediaType: mediaVideo, ContentHash: "vh",
+		FileCategory: categoryVideo, ContentHash: "vh",
 		SidecarRels: []string{"poster.jpg"},
 	})
 	up := &fakeUploader{stored: true}

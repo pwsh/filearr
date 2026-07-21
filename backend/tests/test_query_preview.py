@@ -35,7 +35,6 @@ from filearr.models import (
     Item,
     ItemStatus,
     Library,
-    MediaType,
     PathGrant,
     Principal,
     User,
@@ -91,7 +90,8 @@ async def _mk_item(maker, library_id, rel_path, **kw):
     async with maker() as s:
         item = Item(
             library_id=library_id,
-            media_type=kw.get("media_type", MediaType.other),
+            file_category=kw.get("file_category", "other"),
+            file_group=kw.get("file_group"),
             status=kw.get("status", ItemStatus.active),
             path=f"/data/l/{rel_path}",
             rel_path=rel_path,
@@ -122,15 +122,15 @@ async def _preview(client, query, **kw):
 async def test_preview_returns_fixed_columns_and_item_id(env):
     client, maker = env
     lib = await _mk_lib(maker)
-    iid = await _mk_item(maker, lib, "Movies/a.mkv", media_type=MediaType.video,
+    iid = await _mk_item(maker, lib, "Movies/a.mkv", file_category="video", file_group="video",
                          extension="mkv", size=5_000_000)
-    await _mk_item(maker, lib, "Music/b.mp3", media_type=MediaType.audio)
+    await _mk_item(maker, lib, "Music/b.mp3", file_category="audio", file_group="audio-lossy")
 
     r = await _preview(client, "kind:video")
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["columns"] == [
-        "filename", "library", "rel_path", "media_type", "size", "mtime",
+        "filename", "library", "rel_path", "file_category", "file_group", "size", "mtime",
     ]
     assert body["count"] == 1
     assert body["total"] == 1
@@ -139,7 +139,8 @@ async def test_preview_returns_fixed_columns_and_item_id(env):
     assert row["item_id"] == iid  # opens ItemDetail
     assert row["filename"] == "a.mkv"
     assert row["library"] == "Lib"
-    assert row["media_type"] == "video"
+    assert row["file_category"] == "video"
+    assert row["file_group"] == "video"
 
 
 async def test_preview_empty_query_matches_all_active(env):
@@ -238,7 +239,7 @@ async def test_keys_endpoint_lists_profile_and_cf_keys(env):
     # A profile meta key carries its media types + type hint.
     height = next(k for k in b["meta_keys"] if k["key"] == "height")
     assert height["data_type"] == "integer"
-    assert "image" in height["media_types"]
+    assert "image" in height["file_categories"]
 
 
 # --------------------------------------------------------------------------- #
@@ -300,7 +301,7 @@ async def _mk_user(maker, username, role="user", password="pw-123456"):
 def _scoped_item(lib, rel):
     return Item(
         library_id=lib.id,
-        media_type=MediaType.video,
+        file_category="video", file_group="video",
         path=f"/data/{lib.name}/{rel}",
         rel_path=rel,
         filename=rel.rsplit("/", 1)[-1],

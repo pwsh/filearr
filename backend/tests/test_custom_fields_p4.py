@@ -24,7 +24,7 @@ from filearr import db as db_mod
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Item, Library, MediaType
+from filearr.models import Item, Library
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 CF = "/api/v1/custom-fields"
@@ -98,7 +98,7 @@ async def _seed_item(maker, library_id, rel="a.pdf", user_metadata=None) -> str:
     async with maker() as s:
         item = Item(
             library_id=library_id,
-            media_type=MediaType.document,
+            file_category="document", file_group="document-text",
             path=f"/data/l/{rel}",
             rel_path=rel,
             filename=rel,

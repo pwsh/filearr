@@ -213,7 +213,8 @@ def _file_facts(path: str):
 
 
 async def _make_item(Session, media_type, path: str):
-    from filearr.models import Item, Library, MediaType
+    from filearr.file_groups import detect_category, detect_group
+    from filearr.models import Item, Library
 
     name, ext, size = _file_facts(path)
     async with Session() as s:
@@ -222,7 +223,8 @@ async def _make_item(Session, media_type, path: str):
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType(media_type),
+            file_category=detect_category(path),
+            file_group=detect_group(path),
             path=path,
             rel_path=name,
             filename=name,
@@ -325,12 +327,12 @@ def _client(app):
 
 
 async def _mk_item(maker, library_id, rel_path, *, metadata=None, quick_hash=None, status="active"):
-    from filearr.models import Item, MediaType
+    from filearr.models import Item
 
     async with maker() as s:
         item = Item(
             library_id=library_id,
-            media_type=MediaType.audio,
+            file_category="audio", file_group="audio-lossy",
             status=status,
             path=f"/d/{rel_path}",
             rel_path=rel_path,

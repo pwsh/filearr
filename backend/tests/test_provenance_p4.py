@@ -18,7 +18,7 @@ def _library(**over) -> Library:
         root_path="/data/l",
         hash_policy="auto",
         hash_full_max_bytes=None,
-        enabled_types=[],
+        enabled_categories=[],
         include_globs=[],
         exclude_globs=[],
         enabled_presets=[],
@@ -68,8 +68,8 @@ def test_policy_version_changes_when_scan_config_changes():
 
 def test_policy_version_is_order_insensitive_for_list_config():
     s = Settings()
-    a = policy_version(_library(enabled_types=["video", "audio"]), s)
-    b = policy_version(_library(enabled_types=["audio", "video"]), s)
+    a = policy_version(_library(enabled_categories=["video", "audio"]), s)
+    b = policy_version(_library(enabled_categories=["audio", "video"]), s)
     assert a == b  # reordering an array config value is not a change
 
 
@@ -123,8 +123,9 @@ def _facts(path):
     return p.name, p.suffix.lstrip("."), p.stat().st_size
 
 
-async def _seed(Session, path, media_type="document"):
-    from filearr.models import Item, MediaType
+async def _seed(Session, path):
+    from filearr.file_groups import detect_category, detect_group
+    from filearr.models import Item
 
     name, ext, size = _facts(path)
     async with Session() as s:
@@ -133,7 +134,8 @@ async def _seed(Session, path, media_type="document"):
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType(media_type),
+            file_category=detect_category(path),
+            file_group=detect_group(path),
             path=str(path),
             rel_path=name,
             filename=name,
@@ -233,7 +235,7 @@ async def test_attributed_version_row_only_on_change(db, sample_pdf):
 
 
 async def test_default_source_is_user_for_plain_inserts(db):
-    from filearr.models import Item, ItemVersion, MediaType
+    from filearr.models import Item, ItemVersion
 
     async with db() as s:
         lib = Library(name="uv", root_path="/root")
@@ -241,7 +243,7 @@ async def test_default_source_is_user_for_plain_inserts(db):
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.other,
+            file_category="other", file_group="other",
             path="/root/a",
             rel_path="a",
             filename="a",
@@ -263,7 +265,7 @@ async def test_default_source_is_user_for_plain_inserts(db):
 
 
 async def test_purge_deletes_non_user_rows_and_exempts_user(db, monkeypatch):
-    from filearr.models import Item, ItemVersion, MediaType
+    from filearr.models import Item, ItemVersion
     from filearr.worker import purge_item_versions
 
     monkeypatch.setattr(get_settings(), "audit_retention_days", 30)
@@ -276,7 +278,7 @@ async def test_purge_deletes_non_user_rows_and_exempts_user(db, monkeypatch):
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.other,
+            file_category="other", file_group="other",
             path="/root/p",
             rel_path="p",
             filename="p",

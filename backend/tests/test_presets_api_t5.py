@@ -75,7 +75,7 @@ async def test_list_presets_shape(client):
     assert hd["patterns"] == [".*"]
     assert hd["caveat"]
     groups = {g["name"]: g for g in body["extension_groups"]}
-    assert groups["office_docs"]["media_type"] == "document"
+    assert groups["office_docs"]["file_category"] == "document"
     assert set(groups["office_docs"]["extensions"]) == {"doc", "docx", "odt", "rtf"}
 
 

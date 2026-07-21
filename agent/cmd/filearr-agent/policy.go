@@ -11,6 +11,7 @@ import (
 	agentcfg "github.com/filearr/filearr/agent/internal/config"
 	"github.com/filearr/filearr/agent/internal/enroll"
 	"github.com/filearr/filearr/agent/internal/reconcile"
+	"github.com/filearr/filearr/agent/internal/taxonomy"
 )
 
 // daemonApplier is the `run` daemon's Applier: it live-applies the honored policy
@@ -49,12 +50,28 @@ func newPolicyClient(certStore *enroll.CertStore, centralURL, agentID string, ht
 
 // startPoller launches the policy poll loop for the `run` daemon alongside the
 // renewer/replicator/supervisor. It returns a done-channel for a clean stop.
+//
+// W8-E: the poller also keeps the process-shared taxonomy cache fresh. After
+// every successful poll it version-gates a taxonomy fetch off the policy's
+// taxonomy_version, so an operator taxonomy edit (which bumps the policy ETag)
+// propagates the compact taxonomy to <dataDir>/taxonomy.json — the same file the
+// `scan` path reads. Refresh runs in a detached goroutine so the ~1271-entry
+// fetch never blocks the poll loop.
 func startPoller(ctx context.Context, dataDir string, certStore *enroll.CertStore, centralURL, agentID string, sup *reconcile.Supervisor, httpClient *http.Client) <-chan struct{} {
-	poller := agentcfg.NewPoller(agentcfg.PollerConfig{
-		Client:  newPolicyClient(certStore, centralURL, agentID, httpClient),
-		Cache:   agentcfg.NewETagCache(dataDir),
-		Applier: &daemonApplier{sup: sup, log: newLogger()},
+	taxCache := taxonomy.NewCache(dataDir, newLogger())
+	taxClient := taxonomy.NewClient(taxonomy.ClientConfig{
+		BaseURL: centralURL,
+		AgentID: agentID,
+		AuthFn:  authProvider(certStore),
+		HTTP:    httpClient,
 		Logger:  newLogger(),
+	})
+	poller := agentcfg.NewPoller(agentcfg.PollerConfig{
+		Client:     newPolicyClient(certStore, centralURL, agentID, httpClient),
+		Cache:      agentcfg.NewETagCache(dataDir),
+		Applier:    &daemonApplier{sup: sup, log: newLogger()},
+		Logger:     newLogger(),
+		AfterFetch: taxonomyRefreshHook(taxCache, taxClient, newLogger()),
 	})
 	done := make(chan struct{})
 	go func() {
@@ -64,6 +81,28 @@ func startPoller(ctx context.Context, dataDir string, certStore *enroll.CertStor
 		}
 	}()
 	return done
+}
+
+// taxonomyRefreshHook returns a poller AfterFetch callback that version-gates a
+// taxonomy refresh off the freshly-fetched policy's taxonomy_version (W8-E). The
+// fetch runs in a detached goroutine so it never blocks the poll loop; a nil
+// taxonomy_version (older central / never set) is a no-op.
+func taxonomyRefreshHook(cache *taxonomy.Cache, client *taxonomy.Client, log *slog.Logger) func(context.Context, agentcfg.PolicyDoc) {
+	return func(ctx context.Context, doc agentcfg.PolicyDoc) {
+		pol, err := doc.Parsed()
+		if err != nil {
+			return
+		}
+		want := pol.TaxonomyVersionValue()
+		if want <= cache.Version() {
+			return
+		}
+		go func() {
+			if err := cache.Refresh(ctx, client, want); err != nil {
+				log.Warn("taxonomy refresh failed; keeping last-known taxonomy", "want", want, "err", err)
+			}
+		}()
+	}
 }
 
 // runPolicy implements `filearr-agent policy [--fetch]`: without --fetch it

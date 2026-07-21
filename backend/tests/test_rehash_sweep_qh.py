@@ -17,7 +17,7 @@ from sqlalchemy import text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
-from filearr.models import Agent, Item, Library, MediaType
+from filearr.models import Agent, Item, Library
 from filearr.provenance import _SCHEME
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -45,7 +45,7 @@ async def maker(pg_uri):
 async def _mk_item(s, lib_id, name, *, size, policy_version, status="active"):
     item = Item(
         library_id=lib_id,
-        media_type=MediaType.other,
+        file_category="other", file_group="other",
         status=status,
         path=f"/root/{name}",
         rel_path=name,

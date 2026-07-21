@@ -72,7 +72,7 @@ async def _seed_item(maker) -> str:
         item = (
             await s.execute(
                 text(
-                    "INSERT INTO items (library_id, media_type, status, path, rel_path, "
+                    "INSERT INTO items (library_id, file_category, status, path, rel_path, "
                     "filename, size, mtime) VALUES (:lib, 'video', 'active', "
                     "'/data/l/x.mkv', 'x.mkv', 'x.mkv', 10, now()) RETURNING id"
                 ),

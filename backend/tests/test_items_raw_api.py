@@ -19,7 +19,7 @@ from filearr import db as db_mod
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Item, Library, MediaType
+from filearr.models import Item, Library
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -58,7 +58,7 @@ async def client_and_maker(pg_uri, monkeypatch):
 
 # Every stored Item column the Raw tab must be able to surface (response keys).
 EXPECTED_COLUMNS = {
-    "id", "library_id", "media_type", "status", "path", "rel_path",
+    "id", "library_id", "file_category", "status", "path", "rel_path",
     "filename", "extension", "size", "mtime", "quick_hash", "content_hash",
     "title", "year", "first_seen", "last_seen", "deleted_at", "sidecar_of",
     "external_ids", "metadata", "user_metadata", "tags",
@@ -74,7 +74,7 @@ async def _seed_item(maker) -> str:
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             path="/data/l/Movies/x.mp4",
             rel_path="Movies/x.mp4",
             filename="x.mp4",

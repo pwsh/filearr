@@ -34,11 +34,13 @@ from filearr.api import (
     search,
     stats,
     system,
+    taxonomy,
     transfers,
 )
 
 v1_router = APIRouter()
 v1_router.include_router(system.router, tags=["system"])
+v1_router.include_router(taxonomy.router, tags=["taxonomy"])
 v1_router.include_router(auth.router, tags=["auth"])
 v1_router.include_router(audit.router, tags=["audit"])
 v1_router.include_router(oidc.router, tags=["auth"])

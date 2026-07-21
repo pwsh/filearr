@@ -620,14 +620,14 @@ def media_tree(tmp_path_factory: pytest.TempPathFactory) -> "MediaTree":
         "-i", str(meta), "-map_metadata", "1", "-c:a", "aac", str(m4b),
     ])
     meta.unlink()  # ffmeta helper is not part of the tree
-    primary.setdefault("audiobook", []).append(rel(m4b))
+    primary.setdefault("audio", []).append(rel(m4b))
 
     # --- sample (wav) ---
     samples = root / "Samples"
     samples.mkdir()
     wav = samples / "kick.wav"
     _make_wav(wav)
-    primary.setdefault("sample", []).append(rel(wav))
+    primary.setdefault("audio", []).append(rel(wav))
 
     # --- image (png) ---
     images = root / "Images"
@@ -644,7 +644,7 @@ def media_tree(tmp_path_factory: pytest.TempPathFactory) -> "MediaTree":
     models.mkdir()
     stl = models / "cube.stl"
     trimesh.creation.box(extents=[2.0, 3.0, 4.0]).export(str(stl))
-    primary.setdefault("model3d", []).append(rel(stl))
+    primary.setdefault("three-d-cad", []).append(rel(stl))
 
     # --- document (pdf + docx) ---
     docs = root / "Docs"
@@ -670,7 +670,7 @@ def media_tree(tmp_path_factory: pytest.TempPathFactory) -> "MediaTree":
     wb = openpyxl.Workbook()
     wb.properties.title = "Budget"
     wb.save(str(xlsx))
-    primary.setdefault("spreadsheet", []).append(rel(xlsx))
+    primary.setdefault("document", []).append(rel(xlsx))
 
     # --- junk that must NEVER become an item ---
     # Dotfiles are skipped by walk(); a *.partial is excluded via a glob in the

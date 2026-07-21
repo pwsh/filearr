@@ -11,10 +11,22 @@ from alembic import command
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-# HEAD ASSERTION (P10-T6/T8): the staging dedup-index + activity-watermark
-# revision (d2f4b6a8c0e1) is the new head, chained on P10-T4's staging_transfers
-# (d1e5b9c3a7f2, now its predecessor).
-HEAD = "c7d9e1f3a5b8"
+# HEAD ASSERTION: b6e2d9f4a713 adds libraries.count_pruned_files (the opt-in that
+# makes seen + excluded + pruned_files reconcile with the on-disk file count).
+# Chained on the W8-B media_type cutover (d3f8a1c6e2b5, now its predecessor).
+# NOTE: this constant has gone stale on nearly every migration since W8 — bump it
+# in the SAME commit as any new revision, or the suite fails on the next batch.
+HEAD = "b6e2d9f4a713"
+# W8-B media_type CUTOVER: drops items.media_type + the enum, renames
+# libraries.enabled_types -> enabled_categories (+ adds enabled_groups), and
+# metadata_profiles.media_type -> file_category.
+W8B_REV = "d3f8a1c6e2b5"
+# W8-A taxonomy revision = the W8-B cutover's predecessor (downgrade restores
+# items.media_type + the enum + enabled_types + metadata_profiles.media_type).
+W8A_REV = "a1f4c7e2b9d3"
+# W8-A revision's predecessor (downgrade target that drops the taxonomy tables +
+# items.file_category/file_group, leaving agents.capabilities intact).
+TAXONOMY_PRED = "c7d9e1f3a5b8"
 # P10-T6/T8 revision's predecessor (downgrade target that drops the updated_at
 # column + the active-item partial-unique index, leaving staging_transfers itself
 # intact).
@@ -100,6 +112,65 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         with engine.connect() as conn:
             rev = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
         assert rev == HEAD
+        # W8-B CUTOVER: at head, items.media_type + the media_type enum are GONE;
+        # libraries carries enabled_categories + enabled_groups (not enabled_types);
+        # metadata_profiles is keyed by file_category (not media_type).
+        assert "media_type" not in _columns(engine, "items")
+        lib_cols = _columns(engine, "libraries")
+        assert {"enabled_categories", "enabled_groups"} <= lib_cols
+        assert "enabled_types" not in lib_cols
+        mp_cols = _columns(engine, "metadata_profiles")
+        assert "file_category" in mp_cols and "media_type" not in mp_cols
+        with engine.connect() as conn:
+            # the media_type enum TYPE was dropped
+            assert conn.execute(
+                text("SELECT to_regtype('media_type')")
+            ).scalar() is None
+        # A one-step downgrade to the W8-A revision restores the pre-cutover schema.
+        command.downgrade(cfg, W8A_REV)
+        assert "media_type" in _columns(engine, "items")
+        lib_cols_pre = _columns(engine, "libraries")
+        assert "enabled_types" in lib_cols_pre
+        assert "enabled_groups" not in lib_cols_pre
+        assert "media_type" in _columns(engine, "metadata_profiles")
+        command.upgrade(cfg, "head")
+        # W8-A: the taxonomy tables + items.file_category/file_group at head, seeded
+        # (version=1, all 9 categories, 37 groups, >800 extensions); a one-step
+        # downgrade drops them cleanly and leaves agents.capabilities intact.
+        tax_tables = _tables(engine)
+        assert {
+            "file_categories", "file_groups", "file_group_extensions", "taxonomy_state",
+        } <= tax_tables
+        assert {"file_category", "file_group"} <= _columns(engine, "items")
+        item_idx = {i["name"] for i in inspect(engine).get_indexes("items")}
+        assert {"ix_items_file_category", "ix_items_file_group"} <= item_idx
+        with engine.connect() as conn:
+            assert conn.execute(
+                text("SELECT version FROM taxonomy_state WHERE id = 1")
+            ).scalar() == 1
+            assert conn.execute(text("SELECT count(*) FROM file_categories")).scalar() == 9
+            assert conn.execute(text("SELECT count(*) FROM file_groups")).scalar() == 37
+            assert conn.execute(
+                text("SELECT count(*) FROM file_group_extensions")
+            ).scalar() > 800
+            # FK integrity: every group's category_id resolves.
+            assert conn.execute(
+                text(
+                    "SELECT count(*) FROM file_groups g "
+                    "LEFT JOIN file_categories c ON g.category_id = c.id "
+                    "WHERE c.id IS NULL"
+                )
+            ).scalar() == 0
+        command.downgrade(cfg, TAXONOMY_PRED)
+        tax_pred = _tables(engine)
+        assert "file_categories" not in tax_pred
+        assert "file_groups" not in tax_pred
+        assert "file_group_extensions" not in tax_pred
+        assert "taxonomy_state" not in tax_pred
+        assert "file_category" not in _columns(engine, "items")
+        assert "file_group" not in _columns(engine, "items")
+        assert "capabilities" in _columns(engine, "agents")  # predecessor intact
+        command.upgrade(cfg, "head")
         # W6-D3: agents.capabilities + the inventory command kind at head; a
         # one-step downgrade to the W6-D2 revision drops the column and restores
         # the narrower kind CHECK, leaving agents intact.
@@ -302,7 +373,7 @@ def test_upgrade_downgrade_round_trip(pg_uri):
         assert "metadata_profiles" in tables
         assert "custom_fields" in tables
         mp_cols = _columns(engine, "metadata_profiles")
-        assert {"media_type", "version", "schema"} <= mp_cols
+        assert {"file_category", "version", "schema"} <= mp_cols
         cf_cols = _columns(engine, "custom_fields")
         assert {"name", "data_type", "applies_to", "library_ids", "facetable"} <= cf_cols
         # P4-T5: GIN index + jsonb-object CHECK on items.user_metadata present.
@@ -411,7 +482,7 @@ def test_cascade_delete_removes_orphan_sidecars(pg_uri):
             ).scalar()
             parent = conn.execute(
                 text(
-                    "INSERT INTO items (library_id, media_type, path, rel_path, "
+                    "INSERT INTO items (library_id, file_category, path, rel_path, "
                     "filename, size, mtime) VALUES "
                     "(:lib, 'video', '/data/a.mkv', 'a.mkv', 'a.mkv', 1, now()) "
                     "RETURNING id"
@@ -420,7 +491,7 @@ def test_cascade_delete_removes_orphan_sidecars(pg_uri):
             ).scalar()
             conn.execute(
                 text(
-                    "INSERT INTO items (library_id, media_type, path, rel_path, "
+                    "INSERT INTO items (library_id, file_category, path, rel_path, "
                     "filename, size, mtime, sidecar_of) VALUES "
                     "(:lib, 'other', '/data/a.nfo', 'a.nfo', 'a.nfo', 1, now(), :p)"
                 ),

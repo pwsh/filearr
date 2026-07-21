@@ -42,6 +42,12 @@ services:
   # chosen at `caddy run` time. caddy_data holds the CA/issued+LE certs.
   # Published TLS ports: 8443 (compat, unchanged) + 443 (new; acme mode). The
   # Proxmox deploy overrides 8443 -> ${WEB_TLS_PORT} via docker-compose.override.yml.
+  # These mappings are TCP-ONLY BY DESIGN (Docker's default without a `/udp`
+  # suffix) and BOTH Caddyfiles pin `protocols h1 h2` to match. Do not enable
+  # HTTP/3 here or there in isolation: h3 advertised over an unpublished UDP/443
+  # makes browsers stall on a healthy site (live incident 2026-07-19), and
+  # publishing UDP/443 would let QUIC bypass the caddy-l4 ca.<domain> SNI
+  # passthrough in Caddyfile.acme (docs/ops/tls.md, docs/ops/agents.md §7.4).
   caddy:
     build:
       context: .

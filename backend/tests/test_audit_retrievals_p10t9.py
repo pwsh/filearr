@@ -41,7 +41,6 @@ from filearr.models import (
     Agent,
     ItemStatus,
     Library,
-    MediaType,
     SecurityEvent,
 )
 from filearr.models import Item as ItemModel
@@ -91,7 +90,7 @@ async def _seed(maker):
         await s.flush()
         item = ItemModel(
             library_id=lib.id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             path="/data/media/x.mkv",
             rel_path="x.mkv",
             filename="x.mkv",

@@ -1,13 +1,15 @@
 import logging
+import os
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from filearr import share_map
+from filearr import audit, share_map
+from filearr.api.scan_paths import _normalize_rel_path
 from filearr.db import get_session
 from filearr.errors import extract_error_count, failing_items
 from filearr.models import Item, Library, ScanRun
@@ -19,6 +21,7 @@ from filearr.schemas import (
     LibraryIn,
     LibraryOut,
     LibraryUpdate,
+    TargetedScanIn,
     TreeResponse,
 )
 from filearr.search import delete_docs
@@ -115,6 +118,15 @@ def _validate_schedule_fields(scan_cron: str | None, watch_mode: bool, root_path
         )
 
 
+def _resolve_scan_target(root_path: str, rel: str) -> tuple[bool, bool]:
+    """Resolve a W9 targeted-scan ``rel`` under ``root_path`` from disk, returning
+    ``(exists, is_file)``. Sync helper so the async endpoint keeps ``os.path`` calls
+    out of the coroutine (ASYNC240), mirroring ``scan_paths._validate_scan_path``.
+    ``rel == ""`` resolves to the library root itself (a directory)."""
+    abs_path = os.path.join(root_path, rel) if rel else root_path
+    return os.path.exists(abs_path), os.path.isfile(abs_path)
+
+
 def _validate_preset_entries(names: list[str]) -> None:
     """P2-T5: enforce preset-name validity, raising HTTP 422 on violation.
 
@@ -180,6 +192,17 @@ async def list_libraries(session: AsyncSession = Depends(get_session)):
                 new=stats.get("new"),
                 changed=stats.get("changed"),
                 missing=stats.get("missing"),
+                # Why enumerated files were skipped — lets the Libraries page
+                # explain a gap between the OS folder count and the item count.
+                excluded=stats.get("excluded"),
+                excluded_gate=stats.get("excluded_gate"),
+                excluded_filtered=stats.get("excluded_filtered"),
+                pruned_dirs=stats.get("pruned_dirs"),
+                permission_denied=stats.get("permission_denied"),
+                bytes_seen=stats.get("bytes_seen"),
+                pruned_files=stats.get("pruned_files"),
+                pruned_counted=stats.get("pruned_counted"),
+                pruned_paths=stats.get("pruned_paths"),
             )
         out.append(_library_out(library, last_scan))
     return out
@@ -244,6 +267,11 @@ async def update_library(
             "mode do not apply to replicated content",
         )
     _validate_schedule_fields(eff_cron, eff_watch, eff_root)
+    # W8-B taxonomy-gating fields are NOT NULL; coerce an explicit null to [] (the
+    # documented "clear all / include everything" value).
+    for _gate in ("enabled_categories", "enabled_groups"):
+        if _gate in fields:
+            fields[_gate] = fields[_gate] or []
     # P2-T5 indexing-control fields. Coerce an explicit null to [] (the columns
     # are NOT NULL, and `[]` is the documented "clear all" value), then validate.
     if "enabled_presets" in fields:
@@ -353,7 +381,8 @@ async def browse_tree(
     item_rows = (
         await session.execute(
             text(
-                "SELECT id, rel_path, filename, media_type, size, title, year"
+                "SELECT id, rel_path, filename, file_category, file_group, size,"
+                " title, year"
                 f" FROM items WHERE {exact_dir}"
                 " ORDER BY filename LIMIT :limit OFFSET :offset"
             ),
@@ -365,7 +394,8 @@ async def browse_tree(
             "id": r.id,
             "rel_path": r.rel_path,
             "filename": r.filename,
-            "media_type": r.media_type,
+            "file_category": r.file_category,
+            "file_group": r.file_group,
             "size": r.size,
             "title": r.title,
             "year": r.year,
@@ -633,3 +663,87 @@ async def trigger_scan(library_id: uuid.UUID, session: AsyncSession = Depends(ge
     # unfinished job exists, so bypass defer_scan's (now redundant) dedupe.
     job_id = await defer_scan(str(library_id), force=True)
     return {"job_id": job_id}
+
+
+@router.post("/{library_id}/scan/targeted", status_code=202,
+             dependencies=[Depends(require_scope("write"))])
+async def trigger_targeted_scan(
+    library_id: uuid.UUID,
+    body: TargetedScanIn,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """W9: targeted rescan of a single FILE or a DIRECTORY (optionally recursive).
+
+    Built for automation that lays a directory (or file) down then asks for it to
+    be catalogued WITHOUT a full rescan. The target need NOT already exist in the
+    catalog, but it MUST exist on disk at request time -> 404 otherwise (immediate
+    feedback; a freshly laid-down dir does exist). The scoped scan ingests any
+    new/changed files under the target and tombstones only vanished items WITHIN
+    the exact scanned set (a file: at most that one item; a non-recursive dir: only
+    its direct children; a recursive dir: its whole subtree) -- never anything
+    outside the scope.
+
+    Body: ``{"path": "<rel path>", "recursive": true}``.
+      * ``path`` is normalized + traversal-checked (reuses the scan_paths guard):
+        absolute / ``..`` / drive / NUL -> 422. Empty path == the whole library
+        (a normal full scan).
+      * ``recursive`` is ignored / N/A when ``path`` resolves to a file.
+
+    Enqueues via the same scoped ``defer_scan`` used by hot folders, so a duplicate
+    targeted scan of the SAME path coalesces (the (library, scope) dedupe) and the
+    run streams over the existing scan SSE. 202 + the deferred job id (``scan_id``;
+    null when coalesced) + the echoed scope/recursive/is_file. Audited (write scope).
+    """
+    library = (
+        await session.execute(select(Library).where(Library.id == library_id))
+    ).scalar_one_or_none()
+    if library is None:
+        raise HTTPException(404, "Library not found")
+    # P5-T4: an agent-owned library's content is replicated in, never scanned by
+    # central (its root_path is an agent-side path this host cannot open) -- refuse,
+    # exactly as the full-scan trigger does.
+    if library.source_agent_id is not None:
+        raise HTTPException(
+            422,
+            "this library is owned by a remote agent; its content is replicated "
+            "in, not scanned centrally — scanning it is not permitted",
+        )
+    # Security-critical: normalize + traversal-check BEFORE the path is joined to
+    # the library root (reuses the vetted scan_paths guard). "" => whole library.
+    rel = _normalize_rel_path(body.path)
+    recursive = bool(body.recursive)
+
+    # The target must exist on disk NOW (it need not be in the catalog). Resolve
+    # under the library root and 404 with an automation-friendly detail if absent.
+    exists, is_file = _resolve_scan_target(library.root_path, rel)
+    if not exists:
+        raise HTTPException(
+            404, f"path not found on disk under the library root: {rel}"
+        )
+
+    # Empty path == whole-library scan (rel_path=None => a normal full run, sharing
+    # the library's scan lock/dedupe); a non-empty path is a scoped run.
+    rel_arg = rel or None
+    job_id = await defer_scan(str(library_id), rel_path=rel_arg, recursive=recursive)
+    coalesced = job_id is None
+
+    await audit.emit(
+        audit.SCAN_TARGETED,
+        request=request,
+        details={
+            "library_id": str(library_id),
+            "path": rel,
+            "recursive": recursive,
+            "is_file": is_file,
+            "coalesced": coalesced,
+        },
+    )
+    return {
+        "scan_id": job_id,
+        "library_id": str(library_id),
+        "path": rel,
+        "recursive": recursive,
+        "is_file": is_file,
+        "coalesced": coalesced,
+    }

@@ -43,15 +43,21 @@ type Item struct {
 	MtimeNs     int64
 	QuickHash   string
 	ContentHash string
-	MediaType   string
-	Meta        string // JSON; "" => NULL
-	Status      string
-	IsSidecar   bool
-	SidecarOf   string
-	FirstSeen   time.Time
-	LastSeen    time.Time
-	SyncedAt    *time.Time
-	LocalSeqNo  int64
+	// FileCategory / FileGroup are the File Extension Similarity Taxonomy pair
+	// (W8-E), replacing the old static MediaType. Written from the taxonomy cache
+	// snapshot at scan time so operator taxonomy edits take effect locally. Central
+	// re-classifies authoritatively on apply, so these are purely local signal for
+	// the query surface + thumbnail gating.
+	FileCategory string
+	FileGroup    string
+	Meta         string // JSON; "" => NULL
+	Status       string
+	IsSidecar    bool
+	SidecarOf    string
+	FirstSeen    time.Time
+	LastSeen     time.Time
+	SyncedAt     *time.Time
+	LocalSeqNo   int64
 }
 
 // Store owns the SQLite connection. Rebuilt is true when IntegrityGuard had to
@@ -180,11 +186,12 @@ func InsertItem(ctx context.Context, tx *sql.Tx, it *Item) error {
 	it.LocalSeqNo = seq
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO items(id, root_id, rel_path, filename, extension, size, mtime_ns,
-                  quick_hash, content_hash, media_type, meta, status, is_sidecar,
+                  quick_hash, content_hash, file_category, file_group, meta, status, is_sidecar,
                   sidecar_of, first_seen, last_seen, synced_at, local_seq_no)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		it.ID, it.RootID, it.RelPath, it.Filename, nullStr(it.Extension), it.Size, it.MtimeNs,
-		nullStr(it.QuickHash), nullStr(it.ContentHash), it.MediaType, nullStr(it.Meta), it.Status,
+		nullStr(it.QuickHash), nullStr(it.ContentHash), nullStr(it.FileCategory), nullStr(it.FileGroup),
+		nullStr(it.Meta), it.Status,
 		boolInt(it.IsSidecar), nullStr(it.SidecarOf), tsText(it.FirstSeen), tsText(it.LastSeen),
 		nullTS(it.SyncedAt), it.LocalSeqNo,
 	)
@@ -204,11 +211,12 @@ func UpdateItem(ctx context.Context, tx *sql.Tx, it *Item) error {
 	it.LocalSeqNo = seq
 	_, err = tx.ExecContext(ctx, `
 UPDATE items SET rel_path=?, filename=?, extension=?, size=?, mtime_ns=?,
-                 quick_hash=?, content_hash=?, media_type=?, meta=?, status=?,
+                 quick_hash=?, content_hash=?, file_category=?, file_group=?, meta=?, status=?,
                  is_sidecar=?, sidecar_of=?, last_seen=?, synced_at=?, local_seq_no=?
 WHERE id=?`,
 		it.RelPath, it.Filename, nullStr(it.Extension), it.Size, it.MtimeNs,
-		nullStr(it.QuickHash), nullStr(it.ContentHash), it.MediaType, nullStr(it.Meta), it.Status,
+		nullStr(it.QuickHash), nullStr(it.ContentHash), nullStr(it.FileCategory), nullStr(it.FileGroup),
+		nullStr(it.Meta), it.Status,
 		boolInt(it.IsSidecar), nullStr(it.SidecarOf), tsText(it.LastSeen), nullTS(it.SyncedAt),
 		it.LocalSeqNo, it.ID,
 	)

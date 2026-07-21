@@ -160,12 +160,12 @@ async def _mk_library(maker):
 
 
 async def _mk_item(maker, library_id, rel_path, *, status="active"):
-    from filearr.models import Item, MediaType
+    from filearr.models import Item
 
     async with maker() as s:
         item = Item(
             library_id=library_id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             status=status,
             path=f"/d/{rel_path}",
             rel_path=rel_path,

@@ -39,7 +39,6 @@ from filearr.models import (
     AlertRuleChannel,
     Item,
     Library,
-    MediaType,
     ScanRun,
 )
 from filearr.models import (
@@ -127,7 +126,7 @@ async def _hash_all(session, lib):
 
 
 async def _mk_library(session, root, name):
-    lib = Library(name=name, root_path=str(root), enabled_types=[])
+    lib = Library(name=name, root_path=str(root), enabled_categories=[])
     session.add(lib)
     await session.commit()
     return lib
@@ -360,7 +359,7 @@ async def _seed_group(session, rule, *, n, occurred_at, dedup_key=None, event_ty
         if rule.library_id is not None:
             item = Item(
                 library_id=rule.library_id,
-                media_type=MediaType.video,
+                file_category="video", file_group="video",
                 path=f"/x/{uuid4().hex}",
                 rel_path=f"f{i}-{uuid4().hex}.mkv",
                 filename=f"f{i}.mkv",

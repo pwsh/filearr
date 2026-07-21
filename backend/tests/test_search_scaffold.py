@@ -177,3 +177,31 @@ def test_fingerprint_changes_on_any_field():
 def test_fingerprint_is_hex_sha256():
     fp = embedder_fingerprint(EmbedderConfig("m", 8))
     assert len(fp) == 64 and all(c in "0123456789abcdef" for c in fp)
+
+
+# --- api.search facet-unavailable fallback (live 500 regression 2026-07-18) --
+
+
+def test_is_facet_unavailable_detects_meili_facet_error():
+    """A newly-added filterable attribute (e.g. file_group) is not facetable until
+    Meili finishes re-indexing; the search endpoint must recognize that specific
+    error and degrade (drop facet counts) instead of 500-ing all search."""
+    from filearr.api.search import _is_facet_unavailable
+
+    class _Err:
+        def __init__(self, code: str, msg: str) -> None:
+            self.code = code
+            self._msg = msg
+
+        def __str__(self) -> str:
+            return self._msg
+
+    # By stable Meili error code.
+    assert _is_facet_unavailable(_Err("invalid_search_facets", "whatever"))
+    # By message, case-insensitively (code absent/renamed across versions).
+    assert _is_facet_unavailable(
+        _Err("", "Attribute `file_group` is not filterable. Available: media_type")
+    )
+    # An unrelated API error must NOT be swallowed as a facet degrade.
+    assert not _is_facet_unavailable(_Err("index_not_found", "Index `x` not found."))
+    assert not _is_facet_unavailable(_Err("", "some other failure"))

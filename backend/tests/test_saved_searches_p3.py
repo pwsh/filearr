@@ -55,7 +55,7 @@ def test_search_param_names_excludes_cursor():
 def test_search_param_names_cover_known_params():
     # A representative slice of today's params; if one is RENAMED the saved-search
     # round-trip test below fails, and this makes the vocabulary explicit.
-    for name in ("q", "type", "library", "hash", "sort", "size_gte", "mtime_lte"):
+    for name in ("q", "file_category", "library", "hash", "sort", "size_gte", "mtime_lte"):
         assert name in SEARCH_PARAM_NAMES
 
 
@@ -121,7 +121,7 @@ async def test_saved_search_crud_roundtrip(ss_client):
     client, _sink = ss_client
     body = {
         "name": "Big videos",
-        "params": {"type": "video", "q": "arcane", "size_gte": "1000000"},
+        "params": {"file_category": ["video"], "q": "arcane", "size_gte": "1000000"},
         "owner_principal": "alice",
     }
     r = await client.post("/api/v1/saved-searches", json=body)
@@ -146,11 +146,11 @@ async def test_saved_search_crud_roundtrip(ss_client):
     # patch rename + replace params
     r = await client.patch(
         f"/api/v1/saved-searches/{sid}",
-        json={"name": "Huge videos", "params": {"type": "video", "size_gte": "5000000"}},
+        json={"name": "Huge videos", "params": {"file_category": ["video"], "size_gte": "5000000"}},
     )
     assert r.status_code == 200, r.text
     assert r.json()["name"] == "Huge videos"
-    assert r.json()["params"] == {"type": "video", "size_gte": "5000000"}
+    assert r.json()["params"] == {"file_category": ["video"], "size_gte": "5000000"}
 
     # delete
     r = await client.delete(f"/api/v1/saved-searches/{sid}")
@@ -163,7 +163,7 @@ async def test_saved_search_unknown_param_422_on_create(ss_client):
     client, _sink = ss_client
     r = await client.post(
         "/api/v1/saved-searches",
-        json={"name": "bad", "params": {"type": "video", "bogus_key": "x"}},
+        json={"name": "bad", "params": {"file_category": ["video"], "bogus_key": "x"}},
     )
     assert r.status_code == 422, r.text
     assert "bogus_key" in r.text
@@ -172,7 +172,7 @@ async def test_saved_search_unknown_param_422_on_create(ss_client):
 async def test_saved_search_unknown_param_422_on_update(ss_client):
     client, _sink = ss_client
     r = await client.post(
-        "/api/v1/saved-searches", json={"name": "ok", "params": {"type": "video"}}
+        "/api/v1/saved-searches", json={"name": "ok", "params": {"file_category": ["video"]}}
     )
     sid = r.json()["id"]
     r = await client.patch(
@@ -196,7 +196,7 @@ async def test_saved_search_roundtrip_byte_identical_engine_call(ss_client):
     filter/sort/q as passing those params directly."""
     client, sink = ss_client
     params = {
-        "type": "video",
+        "file_category": ["video"],
         "q": "arcane",
         "size_gte": "1048576",
         "sort": "newest",

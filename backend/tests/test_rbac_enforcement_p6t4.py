@@ -36,7 +36,6 @@ from filearr.main import create_app
 from filearr.models import (
     Item,
     Library,
-    MediaType,
     PathGrant,
     Principal,
     User,
@@ -122,7 +121,7 @@ async def _mk_user(maker, username, role="user", password="pw-123456"):
 def _item(lib, rel):
     return Item(
         library_id=lib.id,
-        media_type=MediaType.video,
+        file_category="video", file_group="video",
         path=f"/data/{lib.name}/{rel}",
         rel_path=rel,
         filename=rel.rsplit("/", 1)[-1],

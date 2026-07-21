@@ -125,6 +125,112 @@ It is stuck if there is **no** `scan_library` job for that library still in
 **Tunable.** `FILEARR_SCAN_RUN_RECONCILE_GRACE_SECONDS` (default 600). Verify via
 `GET /api/v1/system/jobs/reap` → `scan_runs_reconciled > 0`.
 
+## A library indexes fewer files than the OS reports {#library-file-count-mismatch}
+
+**Symptom.** The folder's Windows *Properties* (or `find | wc -l`) reports far
+more files than the library contains, and `seen + excluded` from the last scan
+still does not close the gap.
+
+**This is usually correct behaviour**, not data loss — but until you know *which*
+mechanism dropped the files, you cannot tell that apart from a broken scan.
+
+**Worked example (real, 2026-07-19).** A documents library reported
+`seen 77,394 · excluded 318` against **99,694** files on disk:
+
+```text
+seen              77,394
+excluded         +   318
+                 ────────
+                   77,712     ← what the UI could account for
+on disk            99,694
+                 ────────
+unexplained        21,982     ← all of it inside pruned dot-directories
+```
+
+Every missing file lived under a `.`-prefixed directory (`.git`, `.venv`, `.vs`)
+pruned wholesale by the default-on `hidden_dotfiles` preset.
+
+### The four mechanisms
+
+| Mechanism | Counted as | Visible? |
+| --- | --- | --- |
+| Taxonomy **category/group gate** — the library's selection did not admit the file | `excluded_gate` | yes |
+| **Exclusion spec** — presets, `exclude_globs`, hidden dotfiles | `excluded_filtered` | yes |
+| **Pruned directories** — whole trees skipped *without being enumerated* | `pruned_dirs` (count of dirs) | **files invisible by default** |
+| **Unreadable directories** — `PermissionError` on the directory | `permission_denied` | **files invisible** |
+
+The last two are the trap: pruning deliberately never reads the tree, so the
+files inside are counted **nowhere**. `seen + excluded` is therefore a *lower
+bound* whenever `pruned_dirs > 0`.
+
+### Bisect it: can the container even see the files?
+
+Run this **inside the CT**, against the same directory, before blaming the scan:
+
+```bash
+pct exec 300 -- bash -c 'P="/data/media/<share>/<path>"
+echo "files:       $(find "$P" -type f | wc -l)"
+echo "symlinks:    $(find "$P" -type l | wc -l)"
+echo "unreadable:  $(find "$P" -type d ! -readable | wc -l)"'
+```
+
+If the **file count here is also below** what the OS reports, the loss is in the
+**mount, not Filearr** — rclone over SMB silently drops entries it cannot map
+(invalid characters, over-long paths, listing errors). No scan counter will ever
+explain that; fix the mount.
+
+If it matches, the loss is Filearr's filtering — carry on below.
+
+### Attribute the gap
+
+```bash
+pct exec 300 -- bash -c 'P="/data/media/<share>/<path>"
+echo "under dot-dirs: $(find "$P" -type f -path "*/.*/*" | wc -l)"   # pruned
+echo "dotfiles:       $(find "$P" -type f -name ".*" ! -path "*/.*/*" | wc -l)"
+echo "no extension:   $(find "$P" -type f ! -name "*.*" | wc -l)"
+find "$P" -type f -name "*.*" | sed "s|.*\.||" | tr "[:upper:]" "[:lower:]" \
+  | sort | uniq -c | sort -rn | head -40'
+```
+
+- **`under dot-dirs`** large → the `hidden_dotfiles` prune. Expected for source
+  trees; `.git` alone can hold tens of thousands of objects.
+- **`no extension`** large **and** the library has categories selected → the gate
+  drops all of them (an extensionless file classifies into no `file_group`).
+- **top extensions** → anything not in the library's selected categories/groups is
+  dropped by the gate. An **empty** selection means *index everything*, so
+  `excluded_gate` will be 0.
+
+### Make the numbers reconcile exactly
+
+Enable **Count files in pruned folders** on the library (Admin → edit library →
+Content processing), or via the API:
+
+```bash
+curl -X PATCH http://<host>:8484/api/v1/libraries/<id> \
+  -H 'Content-Type: application/json' -d '{"count_pruned_files": true}'
+```
+
+Then rescan. The walk does a second, deliberately cheap pass over each pruned
+subtree — `scandir` only, no `stat`, no matching, no ingestion — and the identity
+holds exactly:
+
+```text
+seen + excluded + pruned_files == files on disk
+```
+
+The scan also records `pruned_paths` (a capped sample) so the UI names the
+culprits rather than showing a bare count.
+
+**It is off by default on purpose:** that pass fully lists directory trees you
+have deliberately chosen not to index, and directory listing is the expensive
+operation on rclone/SMB mounts — exactly where large pruned trees live. Turn it
+on to investigate, then turn it back off.
+
+**Reading the badge.** The Libraries page shows `excluded N` next to the last
+scan. A trailing **`+`** (e.g. `excluded 318+`) means directories were pruned and
+the count is a lower bound; `excluded 318 + 21,978 pruned` means the opt-in is on
+and the accounting is complete. Hover for the full breakdown.
+
 ## Disk fills up (unbounded generation → Postgres crash)
 
 **Symptom.** On single-volume deploys the thumbnail cache, Postgres data dir and

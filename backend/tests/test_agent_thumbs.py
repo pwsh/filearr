@@ -27,7 +27,7 @@ from filearr import thumbs as th
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Agent, Item, Library, MediaType, ThumbnailManifest
+from filearr.models import Agent, Item, Library, ThumbnailManifest
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -76,7 +76,7 @@ async def _seed(maker, *, rel_path: str = "x.jpg", content_hash: str | None = "c
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.image,
+            file_category="image", file_group="raster-photo",
             path=f"{library_ref}/{rel_path}",
             rel_path=rel_path,
             filename=rel_path.rsplit("/", 1)[-1],

@@ -216,12 +216,12 @@ def test_build_doc_projects_and_caps_archive_members():
     from datetime import UTC, datetime
 
     from filearr import search as search_mod
-    from filearr.models import Item, ItemStatus, MediaType
+    from filearr.models import Item, ItemStatus
 
     item = Item(
         id=uuid.uuid4(),
         library_id=uuid.uuid4(),
-        media_type=MediaType.other,
+        file_category="other", file_group="other",
         path="/data/a.zip",
         rel_path="a.zip",
         filename="a.zip",
@@ -246,12 +246,12 @@ def test_build_doc_omits_absent_archive_members():
     from datetime import UTC, datetime
 
     from filearr import search as search_mod
-    from filearr.models import Item, ItemStatus, MediaType
+    from filearr.models import Item, ItemStatus
 
     item = Item(
         id=uuid.uuid4(),
         library_id=uuid.uuid4(),
-        media_type=MediaType.video,
+        file_category="video", file_group="video",
         path="/data/a.mkv",
         rel_path="a.mkv",
         filename="a.mkv",
@@ -313,7 +313,8 @@ def _file_facts(path: str):
 async def _make_item(Session, media_type, path: str):
     from datetime import UTC, datetime
 
-    from filearr.models import Item, Library, MediaType
+    from filearr.file_groups import detect_category, detect_group
+    from filearr.models import Item, Library
 
     name, ext, size = _file_facts(path)
     async with Session() as s:
@@ -322,7 +323,8 @@ async def _make_item(Session, media_type, path: str):
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType(media_type),
+            file_category=detect_category(path),
+            file_group=detect_group(path),
             path=path,
             rel_path=name,
             filename=name,

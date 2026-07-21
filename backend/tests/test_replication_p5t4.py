@@ -113,7 +113,10 @@ async def test_create_stamps_identity_media_type_scope(db_maker):
             await s.execute(text("SELECT * FROM items"))
         ).mappings().one()
         assert item["rel_path"] == "movies/x.mkv"
-        assert item["media_type"] == "video"          # media_types.detect
+        assert item["file_category"] == "video"          # media_types.detect
+        # W8-A: apply_batch stamps the DB-backed taxonomy (category, group) too.
+        assert item["file_category"] == "video"
+        assert item["file_group"] == "video"
         assert item["status"] == "active"
         assert str(item["source_agent_id"]) == str(agent_id)  # ruling R2 stamp
         assert item["path_scope"] is not None          # rbac.path_to_ltree stamped

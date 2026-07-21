@@ -26,7 +26,7 @@ from filearr.api import search as search_api
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Item, Library, MediaType
+from filearr.models import Item, Library
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -86,7 +86,7 @@ async def _mk_item(
     async with maker() as s:
         item = Item(
             library_id=library_id,
-            media_type=MediaType.document,
+            file_category="document", file_group="document-text",
             status=status,
             path=f"/data/l/{rel_path}",
             rel_path=rel_path,
@@ -382,10 +382,10 @@ async def test_tags_typeahead_count_ordered(monkeypatch):
 async def test_tags_typeahead_scopes_filter(monkeypatch):
     transport, sink = _tags_app(monkeypatch, [("a", 1)])
     async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
-        r = await c.get("/api/v1/search/tags?q=a&type=video")
+        r = await c.get("/api/v1/search/tags?q=a&file_category=video")
     assert r.status_code == 200, r.text
-    # the media_type scope reached the facet_search filter
-    assert "media_type = 'video'" in (sink["filter"] or "")
+    # the file_category scope reached the facet_search filter
+    assert "file_category = 'video'" in (sink["filter"] or "")
 
 
 @pytest.mark.asyncio

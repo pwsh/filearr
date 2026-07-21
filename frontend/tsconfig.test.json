@@ -1,0 +1,25 @@
+{
+  // Type-check ONLY the Node-runner tests under tests/.
+  //
+  // Deliberately separate from tsconfig.json rather than widening its `include`:
+  // the tests need Node's ambient types (`node:test`, `node:assert/strict`), and
+  // putting "node" in the app's `types` would expose `process`, `Buffer`, `__dirname`
+  // and friends to the whole browser SPA — letting genuinely wrong code type-check.
+  // Keeping them apart means the app stays browser-only while the tests (which are
+  // otherwise invisible to `npm run check`) still get checked.
+  //
+  //   npm run check        -> app:   src/**  (browser types)
+  //   npm run check:tests  -> tests: tests/** (node types)
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "noEmit": true,
+    // The tests import "../src/lib/x.ts" WITH the extension because Node's
+    // type-stripping runner resolves real file paths, not bundler-style
+    // extensionless specifiers. Safe here: this project only ever type-checks
+    // (--noEmit), it never compiles through tsc.
+    "allowImportingTsExtensions": true
+  },
+  // src is pulled in because the tests import the modules under test.
+  "include": ["tests/**/*.ts", "src/lib/**/*.ts"]
+}

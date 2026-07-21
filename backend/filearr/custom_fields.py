@@ -37,7 +37,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from filearr.models import CustomField, MediaType  # noqa: F401  (re-exported for API typing)
+from filearr.models import CustomField
 from filearr.profiles import FieldError, FieldSpec, build_validator
 
 # Paperless-shaped custom-field data types -> FieldSpec.data_type used to build
@@ -68,7 +68,7 @@ RESERVED_PREFIXES = ("cf_", "_")
 RESERVED_ATTRIBUTES = frozenset(
     {
         # Item core columns
-        "id", "library_id", "media_type", "status", "path", "rel_path",
+        "id", "library_id", "file_category", "file_group", "status", "path", "rel_path",
         "filename", "extension", "size", "mtime", "quick_hash", "content_hash",
         "title", "year", "external_ids", "metadata", "user_metadata", "tags",
         "first_seen", "last_seen", "deleted_at", "sidecar_of",
@@ -95,7 +95,7 @@ class CustomFieldDef:
     label: str
     data_type: str
     select_options: list[str] | None = None
-    applies_to: list[str] = field(default_factory=list)   # media_type values; [] = all
+    applies_to: list[str] = field(default_factory=list)   # file_category keys; [] = all
     library_ids: list[str] = field(default_factory=list)  # library UUIDs; [] = all
     facetable: bool = False
     sortable: bool = False
@@ -198,18 +198,19 @@ def def_from_model(row: CustomField) -> CustomFieldDef:
 
 
 def applicable_defs(
-    defs: list[CustomFieldDef], *, media_type: str | None, library_id: str | None
+    defs: list[CustomFieldDef], *, file_category: str | None, library_id: str | None
 ) -> list[CustomFieldDef]:
     """Filter definitions down to the ones that APPLY to one item (P4-T4).
 
-    A definition applies when its ``applies_to`` is empty ("all media types") or
-    contains the item's media type, AND its ``library_ids`` is empty ("all
-    libraries", R1) or contains the item's library. A non-applicable definition
-    is excluded, so the key it governs is treated as *unregistered* for that item
-    and passes through :func:`validate_custom_values` unvalidated. Pure: no IO."""
+    A definition applies when its ``applies_to`` is empty ("all categories") or
+    contains the item's ``file_category`` (W8-B re-keyed applicability off the
+    removed media_type), AND its ``library_ids`` is empty ("all libraries", R1) or
+    contains the item's library. A non-applicable definition is excluded, so the
+    key it governs is treated as *unregistered* for that item and passes through
+    :func:`validate_custom_values` unvalidated. Pure: no IO."""
     out: list[CustomFieldDef] = []
     for d in defs:
-        if d.applies_to and (media_type is None or media_type not in d.applies_to):
+        if d.applies_to and (file_category is None or file_category not in d.applies_to):
             continue
         if d.library_ids and (library_id is None or str(library_id) not in d.library_ids):
             continue

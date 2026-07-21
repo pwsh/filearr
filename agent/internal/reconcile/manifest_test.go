@@ -140,7 +140,7 @@ func seedItem(t *testing.T, st *index.Store, rootID, rel, status string, sidecar
 	it := &index.Item{
 		ID: id, RootID: rootID, RelPath: rel, Filename: filepath.Base(rel),
 		Extension: "mkv", Size: 10, MtimeNs: time.Now().UnixNano(),
-		QuickHash: "q", MediaType: "video", Status: status, IsSidecar: sidecar,
+		QuickHash: "q", FileCategory: "video", Status: status, IsSidecar: sidecar,
 		FirstSeen: time.Now(), LastSeen: time.Now(),
 	}
 	if err := index.InsertItem(ctx, tx, it); err != nil {

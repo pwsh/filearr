@@ -59,7 +59,7 @@ class _FakeSearchIndex:
         ns = SimpleNamespace(
             hits=[],
             estimated_total_hits=0,
-            facet_distribution={"media_type": {"video": 3}},
+            facet_distribution={"file_category": {"video": 3}},
         )
         # Only attach facet_stats when the test asked for it, so we can exercise
         # the getattr(...) fallback for clients that omit the attribute.
@@ -129,7 +129,7 @@ async def test_facet_stats_passthrough(monkeypatch):
     body = r.json()
     assert body["facet_stats"] == stats
     # facets distribution still surfaced for the chips.
-    assert body["facets"]["media_type"]["video"] == 3
+    assert body["facets"]["file_category"]["video"] == 3
 
 
 @pytest.mark.asyncio

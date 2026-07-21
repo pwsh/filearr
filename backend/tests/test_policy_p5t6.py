@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
 from filearr import db as db_mod
+from filearr import taxonomy
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
@@ -107,6 +108,31 @@ async def client(db_maker, monkeypatch):
 
 def _auth(fp: str) -> dict:
     return {"Authorization": f"Bearer {fp}"}
+
+
+async def _tax_version(maker) -> int:
+    """The current taxonomy_state.version. Read dynamically because the migrated
+    Postgres is session-shared, so an earlier taxonomy-editing test may have
+    advanced it — the W8-E policy ETag/body carry whatever the live version is."""
+    async with maker() as s:
+        return int(
+            (
+                await s.execute(text("SELECT version FROM taxonomy_state WHERE id = 1"))
+            ).scalar_one()
+        )
+
+
+async def _restore_tax(maker, version: int) -> None:
+    """Undo a taxonomy edit made by a test (delete the probe ext, reset the version
+    counter) so the session-shared DB stays net-unchanged for later tests that
+    assert an absolute taxonomy version (e.g. test_taxonomy_w8)."""
+    async with maker() as s:
+        await s.execute(text("DELETE FROM file_group_extensions WHERE ext = 'zzz'"))
+        await s.execute(
+            text("UPDATE taxonomy_state SET version = :v WHERE id = 1"), {"v": version}
+        )
+        await s.commit()
+    taxonomy.invalidate()
 
 
 # --------------------------------------------------------------------------- #
@@ -223,21 +249,29 @@ async def test_resolution_picks_max_version(db_maker):
 async def test_policy_none_case(client):
     c, maker, _ = client
     agent_id, fp = await _seed_agent(maker)
+    tv = await _tax_version(maker)
     r = await c.get(f"/api/v1/agents/{agent_id}/policy", headers=_auth(fp))
     assert r.status_code == 200
-    assert r.json() == {"scope": "none", "version": 0, "policy": {}}
-    assert r.headers["etag"] == '"none/0"'
+    # W8-E: central injects the live taxonomy_version into every policy doc and
+    # folds it into the ETag as a /t:<v> suffix.
+    assert r.json() == {"scope": "none", "version": 0, "policy": {"taxonomy_version": tv}}
+    assert r.headers["etag"] == f'"none/0/t:{tv}"'
 
 
 async def test_policy_200_with_etag(client):
     c, maker, _ = client
     agent_id, fp = await _seed_agent(maker)
     await c.put("/api/v1/agent-policies/global", json={"policy": {"watch_mode": True}})
+    tv = await _tax_version(maker)
     r = await c.get(f"/api/v1/agents/{agent_id}/policy", headers=_auth(fp))
     assert r.status_code == 200
     body = r.json()
-    assert body == {"scope": "global", "version": 1, "policy": {"watch_mode": True}}
-    assert r.headers["etag"] == '"global/1"'
+    assert body == {
+        "scope": "global",
+        "version": 1,
+        "policy": {"watch_mode": True, "taxonomy_version": tv},
+    }
+    assert r.headers["etag"] == f'"global/1/t:{tv}"'
 
 
 async def test_policy_304_roundtrip(client):
@@ -261,8 +295,9 @@ async def test_scope_flip_invalidates_etag(client):
     agent_id, fp = await _seed_agent(maker)
     for _ in range(3):  # global v1..v3
         await c.put("/api/v1/agent-policies/global", json={"policy": {"g": True}})
+    tv = await _tax_version(maker)
     poll = await c.get(f"/api/v1/agents/{agent_id}/policy", headers=_auth(fp))
-    assert poll.headers["etag"] == '"global/3"'
+    assert poll.headers["etag"] == f'"global/3/t:{tv}"'
     # a more-specific agent-scope policy now exists
     await c.put(
         f"/api/v1/agent-policies/agent:{agent_id}", json={"policy": {"a": True}}
@@ -270,11 +305,11 @@ async def test_scope_flip_invalidates_etag(client):
     # re-poll with the OLD (global/3) validator -> NOT 304, new agent-scope etag
     reptr = await c.get(
         f"/api/v1/agents/{agent_id}/policy",
-        headers={**_auth(fp), "If-None-Match": '"global/3"'},
+        headers={**_auth(fp), "If-None-Match": f'"global/3/t:{tv}"'},
     )
     assert reptr.status_code == 200
-    assert reptr.headers["etag"] == f'"agent:{agent_id}/1"'
-    assert reptr.json()["policy"] == {"a": True}
+    assert reptr.headers["etag"] == f'"agent:{agent_id}/1/t:{tv}"'
+    assert reptr.json()["policy"] == {"a": True, "taxonomy_version": tv}
 
 
 async def test_applied_stamps_agent(client):
@@ -420,4 +455,114 @@ async def test_feature_gate_404_when_disabled(client, monkeypatch):
     assert (await c.get("/api/v1/agent-policies")).status_code == 404
     assert (
         await c.get("/api/v1/agent-policies/global/history")
+    ).status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# W8-E — taxonomy_version in the policy doc/ETag + agent-plane taxonomy endpoint #
+# --------------------------------------------------------------------------- #
+async def test_policy_taxonomy_version_folds_into_etag_and_bumps(client):
+    """A taxonomy edit invalidates the agent's policy cache: the /t:<v> ETag
+    suffix advances and the policy body's taxonomy_version follows."""
+    c, maker, _ = client
+    taxonomy.invalidate()
+    agent_id, fp = await _seed_agent(maker)
+    await c.put("/api/v1/agent-policies/global", json={"policy": {"watch_mode": True}})
+    start = await _tax_version(maker)
+    try:
+        first = await c.get(f"/api/v1/agents/{agent_id}/policy", headers=_auth(fp))
+        assert first.json()["policy"]["taxonomy_version"] == start
+        assert first.headers["etag"] == f'"global/1/t:{start}"'
+
+        # A matching validator is a 304 before the edit.
+        again = await c.get(
+            f"/api/v1/agents/{agent_id}/policy",
+            headers={**_auth(fp), "If-None-Match": f'"global/1/t:{start}"'},
+        )
+        assert again.status_code == 304
+
+        # Edit the taxonomy (add an ext to a group) -> version bumps by one.
+        r = await c.post(
+            "/api/v1/taxonomy/groups/raster-photo/extensions", json={"ext": "zzz"}
+        )
+        assert r.status_code == 200 and r.json()["version"] == start + 1
+
+        # The OLD validator no longer 304s; the new doc/ETag carry the new version.
+        after = await c.get(
+            f"/api/v1/agents/{agent_id}/policy",
+            headers={**_auth(fp), "If-None-Match": f'"global/1/t:{start}"'},
+        )
+        assert after.status_code == 200
+        assert after.headers["etag"] == f'"global/1/t:{start + 1}"'
+        assert after.json()["policy"]["taxonomy_version"] == start + 1
+    finally:
+        await _restore_tax(maker, start)
+
+
+async def test_agent_taxonomy_endpoint_shape(client):
+    """The compact agent taxonomy payload: version + flat maps + primary set."""
+    c, maker, _ = client
+    taxonomy.invalidate()
+    agent_id, fp = await _seed_agent(maker)
+    tv = await _tax_version(maker)
+    r = await c.get(f"/api/v1/agents/{agent_id}/taxonomy", headers=_auth(fp))
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body) == {
+        "version",
+        "ext_to_group",
+        "group_to_category",
+        "category_extractor",
+        "primary_categories",
+    }
+    assert body["version"] == tv
+    # A known extension resolves to the right group + category.
+    assert body["ext_to_group"]["mkv"] == "video"
+    assert body["ext_to_group"]["flac"] == "audio-lossless"
+    assert body["group_to_category"]["video"] == "video"
+    assert body["group_to_category"]["audio-lossless"] == "audio"
+    # Extractor map: media-ish categories route to a pipeline; others are null.
+    assert body["category_extractor"]["image"] == "image"
+    assert body["category_extractor"]["three-d-cad"] == "model3d"
+    assert body["category_extractor"]["archive"] is None
+    # Primary = the categories with an extractor (sidecar-parent eligibility).
+    assert body["primary_categories"] == [
+        "image",
+        "audio",
+        "video",
+        "document",
+        "three-d-cad",
+    ]
+
+
+async def test_agent_taxonomy_endpoint_reflects_edit(client):
+    c, maker, _ = client
+    taxonomy.invalidate()
+    agent_id, fp = await _seed_agent(maker)
+    start = await _tax_version(maker)
+    try:
+        await c.post(
+            "/api/v1/taxonomy/groups/raster-photo/extensions", json={"ext": "zzz"}
+        )
+        r = await c.get(f"/api/v1/agents/{agent_id}/taxonomy", headers=_auth(fp))
+        assert r.json()["version"] == start + 1
+        assert r.json()["ext_to_group"]["zzz"] == "raster-photo"
+    finally:
+        await _restore_tax(maker, start)
+
+
+async def test_agent_taxonomy_requires_agent_credential(client):
+    c, maker, _ = client
+    agent_id, _ = await _seed_agent(maker)
+    assert (await c.get(f"/api/v1/agents/{agent_id}/taxonomy")).status_code == 401
+    bad = await c.get(f"/api/v1/agents/{agent_id}/taxonomy", headers=_auth("nope"))
+    assert bad.status_code == 401
+
+
+async def test_agent_taxonomy_feature_gated(client, monkeypatch):
+    c, maker, settings = client
+    agent_id, fp = await _seed_agent(maker)
+    monkeypatch.setattr(settings, "agents_enabled", False)
+    assert (
+        await c.get(f"/api/v1/agents/{agent_id}/taxonomy", headers=_auth(fp))
     ).status_code == 404

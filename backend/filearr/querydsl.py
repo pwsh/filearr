@@ -34,7 +34,8 @@ span does not split. Each token is either a *filter* or a *free-text term*::
 Recognised filter keys (anything else before ``:`` is treated as free text, so
 ``http://x`` or ``note:2`` are terms, never errors)::
 
-    kind:<str>            media-type name, lower-cased          -> string
+    kind:<str>            file-category name, lower-cased       -> string
+    group:<str>           file-group name, lower-cased          -> string
     ext:<a>[;<b>...]      extension list, dot-stripped, lower   -> list
     path:<glob>           glob, kept verbatim                   -> string
     tag:<str>             tag name, verbatim                    -> string
@@ -97,15 +98,15 @@ from dataclasses import dataclass
 # --- Vocabulary -------------------------------------------------------------
 
 KEYS = frozenset(
-    {"kind", "ext", "size", "modified", "created", "path", "tag", "hash"}
+    {"kind", "group", "ext", "size", "modified", "created", "path", "tag", "hash"}
 )
 _LIST_KEYS = frozenset({"ext"})
 _SIZE_KEYS = frozenset({"size"})
 _TIME_KEYS = frozenset({"modified", "created"})
 _HASH_KEYS = frozenset({"hash"})
-# everything else in KEYS is a plain string value (kind / path / tag)
+# everything else in KEYS is a plain string value (kind / group / path / tag)
 
-_LOWER_KEYS = frozenset({"kind", "ext", "hash"})  # value lower-cased on parse
+_LOWER_KEYS = frozenset({"kind", "group", "ext", "hash"})  # value lower-cased on parse
 
 _SIZE_SUFFIX = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
 _DURATION_UNIT = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
@@ -468,7 +469,7 @@ def _parse_filter_value(key: str, val: str, pos: int) -> FilterValue:
         return _parse_size(val, pos)
     if key in _TIME_KEYS:
         return _parse_time(val, pos)
-    return StringValue(val)  # kind / path / tag
+    return StringValue(val)  # kind / group / path / tag
 
 
 # --- Lexer ------------------------------------------------------------------

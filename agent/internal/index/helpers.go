@@ -9,7 +9,7 @@ import (
 // one place so LoadItems and Search stay column-aligned.
 const selectItemColumns = `
 SELECT id, root_id, rel_path, filename, extension, size, mtime_ns,
-       quick_hash, content_hash, media_type, meta, status, is_sidecar,
+       quick_hash, content_hash, file_category, file_group, meta, status, is_sidecar,
        sidecar_of, first_seen, last_seen, synced_at, local_seq_no
 FROM items`
 
@@ -25,7 +25,8 @@ func scanItem(r rowScanner) (*Item, error) {
 		ext       sql.NullString
 		quick     sql.NullString
 		content   sql.NullString
-		mediaType sql.NullString
+		category  sql.NullString
+		group     sql.NullString
 		meta      sql.NullString
 		sidecarOf sql.NullString
 		firstSeen string
@@ -35,7 +36,7 @@ func scanItem(r rowScanner) (*Item, error) {
 	)
 	if err := r.Scan(
 		&it.ID, &it.RootID, &it.RelPath, &it.Filename, &ext, &it.Size, &it.MtimeNs,
-		&quick, &content, &mediaType, &meta, &it.Status, &isSidecar,
+		&quick, &content, &category, &group, &meta, &it.Status, &isSidecar,
 		&sidecarOf, &firstSeen, &lastSeen, &syncedAt, &it.LocalSeqNo,
 	); err != nil {
 		return nil, err
@@ -43,7 +44,8 @@ func scanItem(r rowScanner) (*Item, error) {
 	it.Extension = ext.String
 	it.QuickHash = quick.String
 	it.ContentHash = content.String
-	it.MediaType = mediaType.String
+	it.FileCategory = category.String
+	it.FileGroup = group.String
 	it.Meta = meta.String
 	it.SidecarOf = sidecarOf.String
 	it.IsSidecar = isSidecar != 0

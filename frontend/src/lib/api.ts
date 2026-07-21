@@ -9,6 +9,10 @@
 export type SearchHit = Record<string, unknown> & {
   snippet?: string;
   highlight?: { title?: string; filename?: string };
+  // File-group facet value (archive / source-code / ebook / raw-photo / …),
+  // derived server-side from the extension. Filterable + facetable, mirroring
+  // ``media_type``.
+  file_group?: string;
 };
 
 export interface SearchResponse {
@@ -80,11 +84,31 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// W8: type filtering is now the two-level file taxonomy — ``file_category``
+// (coarse, ~9 categories) and ``file_group`` (granular). Both are REPEATABLE
+// backend params; the legacy single-select ``media_type``/``type`` param is gone.
+// A flat param record (deep-link hash / saved search) cannot hold repeated keys,
+// so each multi-select rides as ONE comma-joined value here and is expanded into
+// ``key=a&key=b`` for the backend's List[str].
+//
+// NOTE (forward-looking): ``file_category`` + ``file_group`` are intentionally
+// first-class in this flat param vocabulary so the future visual filter builder
+// can emit/consume them 1:1 with the search filters (see FilterBuilderPage).
+const REPEATABLE_SEARCH_PARAMS = ["file_category", "file_group"] as const;
+
 export function search(
   params: Record<string, string>,
   signal?: AbortSignal,
 ): Promise<SearchResponse> {
   const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v !== ""));
+  for (const key of REPEATABLE_SEARCH_PARAMS) {
+    const joined = qs.get(key);
+    if (joined == null) continue;
+    qs.delete(key);
+    for (const v of joined.split(",").map((s) => s.trim()).filter(Boolean)) {
+      qs.append(key, v);
+    }
+  }
   return request(`/search?${qs}`, { signal });
 }
 
@@ -257,6 +281,30 @@ export interface LastScan {
   new?: number | null;
   changed?: number | null;
   missing?: number | null;
+  /** Files the walk enumerated but did NOT ingest: `seen + excluded` = files
+   *  enumerated. Split by cause so a gap between an OS folder count and the
+   *  library total is explainable. */
+  excluded?: number | null;
+  /** Rejected by the library's category/group selection. */
+  excluded_gate?: number | null;
+  /** Rejected by the exclusion spec (presets / exclude_globs / dotfiles). */
+  excluded_filtered?: number | null;
+  /** Directories skipped wholesale — their CONTENTS are never enumerated, so a
+   *  non-zero value means the file accounting is a lower bound. */
+  pruned_dirs?: number | null;
+  /** Directories that could not be read at all (same lower-bound caveat). */
+  permission_denied?: number | null;
+  /** Total on-disk bytes walked. */
+  bytes_seen?: number | null;
+  /** Files inside pruned subtrees. Only meaningful when `pruned_counted` is
+   *  true (the library's `count_pruned_files` opt-in); otherwise pruned trees
+   *  are never enumerated, this stays 0, and `seen + excluded` is a LOWER BOUND
+   *  on what is actually on disk. */
+  pruned_files?: number | null;
+  pruned_counted?: boolean | null;
+  /** Capped sample of pruned directory paths, so the UI can name the culprits
+   *  (".git", ".venv") instead of showing an opaque count. */
+  pruned_paths?: string[] | null;
 }
 
 export interface Library {
@@ -265,7 +313,11 @@ export interface Library {
   root_path: string;
   native_prefix: string | null;
   share_prefix: string | null;
-  enabled_types: string[];
+  // W8: two-level file taxonomy gating (replaces the old ``enabled_types``).
+  // ``enabled_categories`` = category keys (each includes ALL its groups);
+  // ``enabled_groups`` = individually-included group keys. Empty both = all types.
+  enabled_categories: string[];
+  enabled_groups: string[];
   include_globs: string[];
   exclude_globs: string[];
   enabled_presets: string[];
@@ -276,6 +328,10 @@ export interface Library {
   hash_full_max_bytes: number | null;
   ocr_enabled: boolean;
   expose_gps: boolean;
+  /** Opt-in: also enumerate PRUNED subtrees (cheap count, no ingest) so
+   *  seen + excluded + pruned_files reconciles with the on-disk file count.
+   *  Off by default — the extra directory listing is slow on rclone/SMB. */
+  count_pruned_files: boolean;
   enabled: boolean;
   last_scan: LastScan | null;
   // OPS-T7: effective user-facing share prefix + provenance. ``share_prefix``
@@ -310,7 +366,7 @@ export interface Preset {
 export interface ExtensionGroup {
   name: string;
   label: string;
-  media_type: string;
+  file_category: string;
   extensions: string[];
 }
 
@@ -321,6 +377,137 @@ export interface PresetsResponse {
 
 /** The code-constant preset bundles + extension groups (read scope). */
 export const listPresets = () => request<PresetsResponse>("/presets");
+
+// ---- file groups (controlled vocabulary for the search file_group facet) ----
+// One filterable category derived from the file extension (e.g. archive,
+// source-code, ebook, raw-photo). ``media_type`` is the broad type the group
+// rolls up under; ``extensions`` is the membership list (informational — the UI
+// filters by ``id``, never by re-deriving from extensions client-side).
+export interface FileGroup {
+  id: string;
+  label: string;
+  file_category: string;
+  description: string;
+  extensions: string[];
+}
+
+/** The file-group vocabulary that populates the search file_group facet (read
+ *  scope). Mirrors the extension-group catalogue; callers should fall back to a
+ *  small static list if this fails so the filter still renders. */
+export const fileGroups = () => request<FileGroup[]>("/system/file-groups");
+
+// --------------------------------------------------------------------------- //
+// W8 — file-extension similarity taxonomy (category -> group -> extensions).   //
+// The taxonomy is the source of truth for type gating (libraries) and type     //
+// filtering (search). Mutations are admin-scoped and return the bumped         //
+// ``version`` so a UI can show/track the current schema revision.              //
+// --------------------------------------------------------------------------- //
+
+/** Extractor a category routes its files to (or none). Mirrors the media_types
+ *  extractor families; drives which per-type extractor a scan runs. */
+export const TAXONOMY_EXTRACTORS = [
+  "image", "audio", "video", "document", "model3d", "none",
+] as const;
+export type TaxonomyExtractor = (typeof TAXONOMY_EXTRACTORS)[number];
+
+export interface TaxonomyCategory {
+  key: string;
+  label: string;
+  description: string;
+  /** One of TAXONOMY_EXTRACTORS (kept as string — an older/newer backend may
+   *  add families the UI hasn't enumerated). */
+  extractor: string;
+  sort_order: number;
+  is_builtin: boolean;
+}
+
+export interface TaxonomyGroup {
+  key: string;
+  label: string;
+  description: string;
+  sort_order: number;
+  is_builtin: boolean;
+  extensions: string[];
+}
+
+/** One category with its ordered groups (the tree node shape). */
+export interface TaxonomyNode {
+  category: TaxonomyCategory;
+  groups: TaxonomyGroup[];
+}
+
+export interface TaxonomyTree {
+  version: number;
+  tree: TaxonomyNode[];
+}
+
+/** Every mutation echoes the new schema ``version``. */
+export interface TaxonomyVersion {
+  version: number;
+}
+
+/** Adding an extension is an UPSERT: if it already belonged to another group the
+ *  server reparents it and reports the ``previous_group`` it moved from. */
+export interface ExtensionUpsertResult extends TaxonomyVersion {
+  ext: string;
+  group_key: string;
+  previous_group: string | null;
+}
+
+/** The full taxonomy tree + current version (read scope). Callers degrade to an
+ *  empty tree so the type filters / library gating still render if it fails. */
+export const getTaxonomy = () => request<TaxonomyTree>("/taxonomy");
+
+export const createTaxonomyCategory = (body: {
+  key: string;
+  label: string;
+  description?: string;
+  extractor?: string;
+  sort_order?: number;
+}) => request<TaxonomyVersion>("/taxonomy/categories", { method: "POST", body: JSON.stringify(body) });
+
+export const updateTaxonomyCategory = (
+  key: string,
+  patch: Partial<{ label: string; description: string; extractor: string; sort_order: number }>,
+) => request<TaxonomyVersion>(`/taxonomy/categories/${encodeURIComponent(key)}`, {
+  method: "PATCH",
+  body: JSON.stringify(patch),
+});
+
+/** DELETE a category. 409 if it still has groups (reparent/remove them first). */
+export const deleteTaxonomyCategory = (key: string) =>
+  request<TaxonomyVersion>(`/taxonomy/categories/${encodeURIComponent(key)}`, { method: "DELETE" });
+
+export const createTaxonomyGroup = (body: {
+  key: string;
+  label: string;
+  description?: string;
+  category_key: string;
+  sort_order?: number;
+}) => request<TaxonomyVersion>("/taxonomy/groups", { method: "POST", body: JSON.stringify(body) });
+
+/** PATCH a group — including ``category_key`` to REPARENT it under another category. */
+export const updateTaxonomyGroup = (
+  key: string,
+  patch: Partial<{ label: string; description: string; category_key: string; sort_order: number }>,
+) => request<TaxonomyVersion>(`/taxonomy/groups/${encodeURIComponent(key)}`, {
+  method: "PATCH",
+  body: JSON.stringify(patch),
+});
+
+export const deleteTaxonomyGroup = (key: string) =>
+  request<TaxonomyVersion>(`/taxonomy/groups/${encodeURIComponent(key)}`, { method: "DELETE" });
+
+/** Add (or MOVE) an extension onto a group. Upsert: reparents if it already
+ *  existed, returning ``previous_group``. 422 on a bad ext (^[a-z0-9_+-]{1,32}$). */
+export const addTaxonomyExtension = (groupKey: string, ext: string) =>
+  request<ExtensionUpsertResult>(
+    `/taxonomy/groups/${encodeURIComponent(groupKey)}/extensions`,
+    { method: "POST", body: JSON.stringify({ ext }) },
+  );
+
+export const deleteTaxonomyExtension = (ext: string) =>
+  request<TaxonomyVersion>(`/taxonomy/extensions/${encodeURIComponent(ext)}`, { method: "DELETE" });
 
 export const listLibraries = () => request<Library[]>("/libraries");
 
@@ -378,7 +565,8 @@ export const createLibrary = (body: {
   root_path: string;
   native_prefix?: string | null;
   share_prefix?: string | null;
-  enabled_types?: string[];
+  enabled_categories?: string[];
+  enabled_groups?: string[];
   include_globs?: string[];
   exclude_globs?: string[];
   enabled_presets?: string[];
@@ -389,6 +577,7 @@ export const createLibrary = (body: {
   hash_full_max_bytes?: number | null;
   ocr_enabled?: boolean;
   expose_gps?: boolean;
+  count_pruned_files?: boolean;
 }) => request<Library>("/libraries", { method: "POST", body: JSON.stringify(body) });
 
 // Partial update (scan_cron / watch_mode edits are re-validated server-side; a
@@ -400,7 +589,8 @@ export const updateLibrary = (
     root_path: string;
     native_prefix: string | null;
     share_prefix: string | null;
-    enabled_types: string[];
+    enabled_categories: string[];
+    enabled_groups: string[];
     include_globs: string[];
     exclude_globs: string[];
     enabled_presets: string[];
@@ -411,6 +601,7 @@ export const updateLibrary = (
     hash_full_max_bytes: number | null;
     ocr_enabled: boolean;
     expose_gps: boolean;
+    count_pruned_files: boolean;
     enabled: boolean;
   }>,
 ) => request<Library>(`/libraries/${id}`, { method: "PATCH", body: JSON.stringify(patch) });
@@ -497,6 +688,31 @@ export async function deleteCustomField(id: string): Promise<void> {
 
 export const scanLibrary = (id: string) =>
   request<{ job_id: number }>(`/libraries/${id}/scan`, { method: "POST" });
+
+/** W9 targeted rescan of a single FILE or a DIRECTORY under a library root. The
+ *  `path` is a rel_path ('' = whole library, file or dir); `recursive` descends
+ *  into subdirectories (ignored server-side when the path is a file). The target
+ *  need NOT be in the catalog yet, but must exist on disk -> a 404 (surfaced by
+ *  the caller inline) means the path is absent under the library root. A 202
+ *  returns the deferred job id (`scan_id`, null when it coalesced onto an
+ *  in-flight scan of the same scope) plus the echoed scope. */
+export interface TargetedScanResult {
+  scan_id: number | null;
+  library_id: string;
+  path: string;
+  recursive: boolean;
+  is_file: boolean;
+  coalesced: boolean;
+}
+
+export const targetedScan = (
+  id: string,
+  body: { path: string; recursive?: boolean },
+) =>
+  request<TargetedScanResult>(`/libraries/${id}/scan/targeted`, {
+    method: "POST",
+    body: JSON.stringify({ path: body.path, recursive: body.recursive ?? true }),
+  });
 
 export const listScans = () => request<ScanRun[]>("/scans");
 
@@ -650,6 +866,9 @@ export interface ScanRunning {
   library_id: string;
   library_name: string;
   rel_path: string | null;
+  /** ISO start time — the dashboard derives files/min as `stats.seen` over the
+   *  elapsed wall time, matching the SSE endpoint's own `rate`. */
+  started_at: string | null;
   stats: Record<string, number>;
 }
 
@@ -745,6 +964,19 @@ export interface ThumbsSummary {
   queue: Record<string, number>;
 }
 
+/** Aggregate walk throughput across recent COMPLETED scans. Weighted
+ *  (SUM(files)/SUM(seconds)), never an average of per-run rates — a tiny scoped
+ *  rescan must not outweigh a long full scan. */
+export interface ScanThroughput {
+  runs: number;
+  files: number;
+  bytes: number;
+  seconds: number;
+  files_per_min: number;
+  bytes_per_s: number;
+  window_days: number;
+}
+
 export interface JobsSummary {
   queues: Record<string, Record<string, number>>;
   extract: ExtractSummary;
@@ -765,6 +997,8 @@ export interface JobsSummary {
   resources: ResourcesSummary;
   /** Thumbnail-creation monitor (rides the same poll). */
   thumbs: ThumbsSummary;
+  /** Aggregate scan walk throughput over recent finished runs. */
+  scan_throughput: ScanThroughput;
   /** Per-queue upcoming scheduled work (≤3 soonest each). Absent/empty queues
    *  render no "Upcoming" block. */
   upcoming: Record<string, UpcomingJob[]>;
@@ -852,7 +1086,9 @@ export interface TreeItem {
   id: string;
   rel_path: string;
   filename: string;
-  media_type: string;
+  // W8-B: the taxonomy classification replaced the removed media_type.
+  file_category: string | null;
+  file_group: string | null;
   size: number;
   title: string | null;
   year: number | null;
@@ -928,7 +1164,7 @@ export interface MetadataProfileField {
 
 export interface MetadataProfile {
   id: string;
-  media_type: string;
+  file_category: string;
   version: number;
   created_at: string;
   /** field name -> declared shape (label/type/hints). NOTE: JSONB key order is
@@ -1862,7 +2098,7 @@ export interface MetaKeyInfo {
   key: string;
   label: string;
   data_type: string;
-  media_types: string[];
+  file_categories: string[];
 }
 
 export interface CustomFieldKeyInfo {
@@ -1876,6 +2112,7 @@ export interface QueryKeys {
   meta_keys: MetaKeyInfo[];
   custom_fields: CustomFieldKeyInfo[];
   kinds: string[];
+  groups: string[];
   source: string;
 }
 

@@ -28,7 +28,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
-from filearr.models import Agent, AgentCommand, Item, Library, MediaType, StagingTransfer
+from filearr.models import Agent, AgentCommand, Item, Library, StagingTransfer
 from filearr.staging_sweep import run_staging_cleanup_sweep
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -69,7 +69,7 @@ async def _seed(maker) -> dict:
         s.add(lib)
         await s.flush()
         item = Item(
-            library_id=lib.id, media_type=MediaType.video,
+            library_id=lib.id, file_category="video", file_group="video",
             path="/agentroot/m.mkv", rel_path="m.mkv", filename="m.mkv",
             size=10, mtime=datetime.now(UTC),
         )

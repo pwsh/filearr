@@ -2,7 +2,7 @@
 
 Two layers:
   * pure unit tests over ``presets.resolve_enabled_extensions`` (union of groups
-    per MediaType, None when unrefined, defensive enabled_types gating);
+    per MediaType, None when unrefined, defensive enabled_categories gating);
   * a DB-integration scan over a real on-disk document tree proving the walk's
     extension filter narrows an enabled type to the union of the enabled groups,
     while an empty group set reproduces today's all-extensions behaviour.
@@ -18,7 +18,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
-from filearr.models import Item, Library, MediaType, ScanRun
+from filearr.models import Item, Library, ScanRun
 from filearr.presets import resolve_enabled_extensions
 
 from .conftest import psycopg3_uri
@@ -30,11 +30,11 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 
 
 def test_no_groups_means_no_refinement():
-    assert resolve_enabled_extensions(MediaType.document, [], []) is None
+    assert resolve_enabled_extensions("document", [], []) is None
 
 
 def test_single_group_narrows_type():
-    assert resolve_enabled_extensions(MediaType.document, [], ["office_docs"]) == {
+    assert resolve_enabled_extensions("document", [], ["office_docs"]) == {
         "doc", "docx", "odt", "rtf",
     }
 
@@ -42,28 +42,28 @@ def test_single_group_narrows_type():
 def test_multiple_groups_union_same_type():
     # R5: office_docs + ebooks both target `document` -> UNION.
     assert resolve_enabled_extensions(
-        MediaType.document, [], ["office_docs", "ebooks"]
+        "document", [], ["office_docs", "ebooks"]
     ) == {"doc", "docx", "odt", "rtf", "epub", "mobi", "azw3", "cbz", "cbr"}
 
 
 def test_group_for_other_type_does_not_refine():
     # A group targeting `image` leaves `document` unrefined (None).
-    assert resolve_enabled_extensions(MediaType.document, [], ["raw_photos"]) is None
-    assert resolve_enabled_extensions(MediaType.image, [], ["raw_photos"]) == {
+    assert resolve_enabled_extensions("document", [], ["raw_photos"]) is None
+    assert resolve_enabled_extensions("image", [], ["raw_photos"]) == {
         "cr2", "cr3", "nef", "arw", "dng", "raf",
     }
 
 
 def test_disabled_type_returns_none():
-    # enabled_types non-empty + type not in it -> gated off elsewhere, no refine.
+    # enabled_categories non-empty + type not in it -> gated off elsewhere, no refine.
     assert resolve_enabled_extensions(
-        MediaType.document, ["video"], ["office_docs"]
+        "document", ["video"], ["office_docs"]
     ) is None
 
 
 def test_unknown_group_ignored_in_resolution():
     # Validation is the API's job; resolution stays total.
-    assert resolve_enabled_extensions(MediaType.document, [], ["nope"]) is None
+    assert resolve_enabled_extensions("document", [], ["nope"]) is None
 
 
 # --- Integration: extension filter in the scan walk ------------------------
@@ -117,22 +117,25 @@ async def _scan_rels(session, library) -> set[str]:
 
 
 @pytest.mark.parametrize(
-    ("groups", "expected"),
+    ("categories", "groups", "expected"),
     [
-        ([], {"a.pdf", "b.docx", "c.epub", "d.txt"}),          # no refinement
-        (["office_docs"], {"b.docx"}),                          # narrow to office
-        (["office_docs", "ebooks"], {"b.docx", "c.epub"}),      # union (R5)
+        # W8-B taxonomy gating (the successor to the P2-T3 extension-group scan
+        # refinement): a.pdf->pdf, b.docx->document-office, c.epub->ebook,
+        # d.txt->document-text (all under file_category 'document').
+        (["document"], [], {"a.pdf", "b.docx", "c.epub", "d.txt"}),   # whole category
+        ([], ["document-office"], {"b.docx"}),                        # one group
+        ([], ["document-office", "ebook"], {"b.docx", "c.epub"}),     # group OR (R5)
     ],
 )
-async def test_extension_group_filter_in_scan(engine, tmp_path, groups, expected):
+async def test_taxonomy_group_filter_in_scan(engine, tmp_path, categories, groups, expected):
     _doc_tree(tmp_path)
     Session = async_sessionmaker(engine, expire_on_commit=False)
     async with Session() as session:
         lib = Library(
-            name=f"docs-{'-'.join(groups) or 'all'}",
+            name=f"docs-{'-'.join(categories + groups) or 'all'}",
             root_path=str(tmp_path),
-            enabled_types=["document"],
-            enabled_extension_groups=groups,
+            enabled_categories=categories,
+            enabled_groups=groups,
         )
         session.add(lib)
         await session.commit()

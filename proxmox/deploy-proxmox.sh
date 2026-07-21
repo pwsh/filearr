@@ -105,6 +105,10 @@ PUBLIC_BASE_URL=${PUBLIC_BASE_URL:-}
 TLS_MODE=${TLS_MODE:-internal}
 TLS_DOMAIN=${TLS_DOMAIN:-}
 ACME_EMAIL=${ACME_EMAIL:-}
+AGENTS_ENABLED=${AGENTS_ENABLED:-no}
+AGENTS_CA_URL=${AGENTS_CA_URL:-}
+THUMBS_STORAGE=${THUMBS_STORAGE:-}
+THUMBS_SIZE_GB=${THUMBS_SIZE_GB:-64}
 TEMPLATE=$TEMPLATE
 PRIVILEGED=$PRIVILEGED
 EOF
@@ -148,6 +152,62 @@ ensure_public_base_url() {
     echo "  must start with http:// or https:// (or leave blank) - try again"
   done
   persist_public_base_url
+}
+
+# ---------- dedicated thumbnail volume (filesystem crash isolation) ----------
+# Persisted in deploy.conf as THUMBS_STORAGE / THUMBS_SIZE_GB and applied at CT
+# CREATE as a pct mount point on ${CT_APP_DIR}/config/thumbnails. Motivation: a
+# LIVE INCIDENT (thumbnail generation filled /config and crashed Postgres —
+# backend FIX-11) plus the same isolation later hand-applied to a live CT. The
+# mount is CT config, NOT compose state: the existing ./config:/config bind
+# carries the submount into every container, the source push preserves config/,
+# and deploy_stack's override regeneration never touches it. Blank
+# THUMBS_STORAGE = share the rootfs (previous behaviour). Prompt-once contract
+# mirrors ensure_public_base_url; to change later edit $CONF — a change applies
+# only at CT CREATE (for a live CT: stack down, mv thumbnails aside,
+# `pct set <vmid> -mp<N> <storage>:<gb>,mp=<path>,backup=0`, reboot, copy back).
+# Sizing note: grid thumbs cap at 20 KB/item — a 1M-item catalog can reach
+# ~20 GB, and the disk monitor WARNs below 20 GB free per filesystem, so the
+# 64 GB default is deliberate; smaller volumes boot straight into WARN.
+persist_thumbs_config() {
+  mkdir -p "$CONF_DIR"; touch "$CONF"
+  local tmp; tmp="$(mktemp)"
+  grep -vE '^(THUMBS_STORAGE|THUMBS_SIZE_GB)=' "$CONF" 2>/dev/null > "$tmp" || true
+  printf 'THUMBS_STORAGE=%s\n' "${THUMBS_STORAGE:-}" >> "$tmp"
+  printf 'THUMBS_SIZE_GB=%s\n' "${THUMBS_SIZE_GB:-64}" >> "$tmp"
+  mv "$tmp" "$CONF"; chmod 600 "$CONF"
+}
+
+ensure_thumbs_config() {
+  # already answered (even if blank = share rootfs) -> never re-ask
+  [[ -n "${THUMBS_STORAGE+set}" ]] && return 0
+  if [[ ! -t 0 ]]; then
+    THUMBS_STORAGE=""; THUMBS_SIZE_GB="${THUMBS_SIZE_GB:-64}"
+    echo "note: THUMBS_STORAGE unset and no TTY - thumbnails share the rootfs (edit $CONF to isolate)."
+    persist_thumbs_config
+    return 0
+  fi
+  echo
+  echo "── thumbnail volume ──"
+  echo "  A dedicated volume mounted at ${CT_APP_DIR}/config/thumbnails: a full"
+  echo "  thumbnail cache then stops thumbnail writes WITHOUT starving Postgres/"
+  echo "  Meilisearch on the rootfs (this exact failure crashed a live deploy)."
+  echo "Available storage:"; pvesm status | awk 'NR>1{print "  - "$1" ("$2")"}'
+  while true; do
+    ask "Thumbnail volume storage (blank = share the rootfs)" "${THUMBS_STORAGE:-}"
+    THUMBS_STORAGE="$REPLY"
+    [[ -z "$THUMBS_STORAGE" ]] && break
+    pvesm status 2>/dev/null | awk 'NR>1{print $1}' | grep -qx "$THUMBS_STORAGE" && break
+    echo "  '$THUMBS_STORAGE' is not a storage pvesm knows - try again (or blank to skip)"
+  done
+  if [[ -n "$THUMBS_STORAGE" ]]; then
+    while true; do
+      ask "  thumbnail volume size GB" "${THUMBS_SIZE_GB:-64}"
+      [[ "$REPLY" =~ ^[0-9]+$ ]] && { THUMBS_SIZE_GB="$REPLY"; break; }
+      echo "  must be a whole number of GB"
+    done
+  fi
+  persist_thumbs_config
 }
 
 # ---------- TLS mode (internal CA vs Let's Encrypt DNS-01 wildcard) ----------
@@ -209,6 +269,52 @@ ensure_tls_config() {
     [[ -n "${ACME_EMAIL:-}" ]] || die "acme-dns mode requires an ACME email (ACME_EMAIL)"
   fi
   persist_tls_config
+}
+
+# ---------- Cloudflare API token presence (acme-dns) ----------
+# The token is a SECRET kept ONLY in the CT .env (never deploy.conf). ensure_tls_config
+# prompts for it exactly once — when acme-dns is first configured — then early-returns on
+# every later run. That left a live gap (2026-07-19): recreating the CT regenerates a
+# fresh .env, so the token silently vanished and the stack came up CERTLESS behind only a
+# buried WARNING (caddy: "missing API token" at Caddyfile.acme:51). These two helpers close
+# it. ct_has_cf_token reports whether the CT that will ACTUALLY be deployed already carries
+# a non-empty token; handle_cloudflare_token prompts when appropriate (host-side; the value
+# flows into .env via deploy_stack, which overwrites only when a new value was entered —
+# blank always means "keep the CT's current token").
+ct_has_cf_token() {
+  [[ -n "${VMID:-}" ]] || return 1
+  pct status "$VMID" >/dev/null 2>&1 || return 1
+  pct exec "$VMID" -- bash -c "grep -q '^CLOUDFLARE_API_TOKEN=..*' '${CT_APP_DIR}/.env' 2>/dev/null"
+}
+
+# mode "replace" (wizard / --reconfigure): always offer the prompt so a rotated/expired
+#   token can be swapped in — blank keeps the current one, or enters one if the CT has none.
+# mode "ensure" (deploy safety net): prompt ONLY when the target CT has no token, so an
+#   ordinary redeploy is never nagged but a recreated/destroyed CT can't silently come up
+#   certless. Non-interactive runs degrade to the same loud warning deploy_stack already emits.
+handle_cloudflare_token() {
+  local mode="$1"
+  [[ "${TLS_MODE:-internal}" == "acme-dns" ]] || return 0
+  [[ -n "${CLOUDFLARE_API_TOKEN:-}" ]] && return 0     # captured earlier this run
+  [[ "${CF_TOKEN_HANDLED:-0}" == 1 ]] && return 0       # already prompted this run
+  local present="no"; ct_has_cf_token && present="yes"
+  [[ "$mode" == "ensure" && "$present" == "yes" ]] && return 0
+  if [[ ! -t 0 ]]; then
+    [[ "$present" == "yes" ]] || echo "note: acme-dns but no Cloudflare API token in the target CT .env and none supplied — LE issuance will FAIL until CLOUDFLARE_API_TOKEN is set in the CT .env."
+    return 0
+  fi
+  echo
+  echo "── Cloudflare API token (acme-dns) ──"
+  if [[ "$present" == "yes" ]]; then
+    echo "  A token is already set in CT ${VMID}. Leave blank to KEEP it, or paste a new"
+    echo "  one to REPLACE it (e.g. rotated/expired)."
+  else
+    echo "  No token is set in the target CT — a recreated container needs it re-entered,"
+    echo "  or LE issuance stays broken (blank leaves it broken for now)."
+  fi
+  echo "  Scope: Zone:DNS:Edit on the ${TLS_DOMAIN:-<domain>} zone (stored in the CT .env only, never echoed)."
+  read -r -s -p "  Cloudflare API token: " CLOUDFLARE_API_TOKEN; echo
+  CF_TOKEN_HANDLED=1
 }
 
 # ---------- distributed agents (P5 platform: step-ca + enrollment endpoints) ----------
@@ -494,6 +600,7 @@ wizard() {
   echo "Available storage:"; pvesm status | awk 'NR>1{print "  - "$1" ("$2")"}'
   ask "Rootfs storage" "${STORAGE:-local-lvm}"; STORAGE=$REPLY
   ask "Disk size GB" "${DISK_GB:-16}"; DISK_GB=$REPLY
+  ensure_thumbs_config
   ask "CPU cores" "${CORES:-4}"; CORES=$REPLY
   ask "Memory MB" "${MEMORY_MB:-4096}"; MEMORY_MB=$REPLY
   ask "Web UI port (on the container's IP)" "${WEB_PORT:-8484}"; WEB_PORT=$REPLY
@@ -529,6 +636,10 @@ wizard() {
   fi
   ensure_template
   save_conf
+  # acme-dns: offer to enter/replace the Cloudflare token (blank = keep the CT's
+  # current one). VMID is final here, so the prompt is correct whether we are
+  # reconfiguring the existing CT or deploying a brand-new one.
+  handle_cloudflare_token replace
 }
 
 # ---------- container lifecycle ----------
@@ -569,6 +680,19 @@ create_ct() {
     args+=(--mp${idx} "${share},mp=${CT_MEDIA_ROOT}/${name},ro=1")
     idx=$((idx+1))
   done 3< "$STORAGES_ENV"
+
+  # Dedicated thumbnail volume (ensure_thumbs_config): its own filesystem, so a
+  # full cache stops thumbnail writes without starving Postgres on the rootfs.
+  # Takes the next mp index AFTER the local-storage binds above. backup=0: the
+  # cache is a disposable projection — vzdump must not balloon on it. LXC
+  # auto-creates the target path, and the ./config:/config compose bind carries
+  # the submount into the containers (submounts present at container start are
+  # included in the rbind).
+  if [[ -n "${THUMBS_STORAGE:-}" ]]; then
+    args+=(--mp${idx} "${THUMBS_STORAGE}:${THUMBS_SIZE_GB:-64},mp=${CT_APP_DIR}/config/thumbnails,backup=0")
+    idx=$((idx+1))
+    echo "==> thumbnails on dedicated ${THUMBS_STORAGE}:${THUMBS_SIZE_GB:-64}G volume"
+  fi
 
   echo "==> creating CT $VMID ($HOSTNAME_, privileged=$PRIVILEGED) on $BRIDGE"
   pct create "$VMID" "$TEMPLATE" "${args[@]}"
@@ -864,7 +988,14 @@ else
 fi
 docker compose pull postgres meilisearch --quiet || true
 docker compose ${profile_args} build --pull ${FORCE_REBUILD:+--no-cache}
-docker compose ${profile_args} up -d --remove-orphans"
+docker compose ${profile_args} up -d --remove-orphans
+# Bound the buildkit cache (2026-07-21 audit: repeated deploys had accreted
+# 11 GB, 8.8 GB reclaimable, on the CT rootfs). Runs AFTER build+up so the
+# layers just built are the most-recently-used and are what --keep-storage
+# retains — the next redeploy stays incremental. NEVER a full prune: that
+# would force every redeploy into a cold multi-minute rebuild. || true: cache
+# hygiene must not fail a deploy.
+docker builder prune -f --keep-storage 6GB 2>/dev/null | tail -n1 || true"
   configure_agents
   echo "==> bootstrap DB / queue / index (idempotent)"
   pct exec "$VMID" -- bash -c "cd $CT_APP_DIR && docker compose run --rm app python scripts/init_db.py"
@@ -1071,13 +1202,37 @@ esac
 ensure_public_base_url
 # Same prompt-once discipline for the TLS mode (internal vs acme-dns).
 ensure_tls_config
+# Safety net: in acme-dns mode the Cloudflare token must exist in the CT that is
+# about to be deployed. Prompts ONLY when it is actually missing (a recreated or
+# destroyed CT), so ordinary redeploys are never nagged; deduped against the
+# wizard's "replace" prompt above via CF_TOKEN_HANDLED / a token already entered.
+handle_cloudflare_token ensure
 # Same prompt-once discipline for the distributed-agent platform (step-ca +
 # enrollment endpoints); the JWK secret itself is handled in-CT at deploy time.
 ensure_agents_config
+# Same prompt-once discipline for the dedicated thumbnail volume (applied at CT
+# create; drift-checked against an existing CT in the redeploy branch below).
+ensure_thumbs_config
 
 if [[ -n "${VMID:-}" ]] && pct status "$VMID" >/dev/null 2>&1; then
   echo "── redeploying to existing CT $VMID with saved defaults ──"
   pct start "$VMID" >/dev/null 2>&1 || true
+  # Thumbs-volume drift check: the conf promises dedicated storage but this CT
+  # has no mount on the thumbnails path (conf answered after the CT was created,
+  # or the mp was removed by hand). A pct mp cannot be hot-added mid-redeploy —
+  # it needs the stack down and a CT reboot — so warn LOUDLY with the exact
+  # hand-apply sequence instead of silently reverting to shared-rootfs behaviour.
+  if [[ -n "${THUMBS_STORAGE:-}" ]] && \
+     ! pct exec "$VMID" -- mountpoint -q "${CT_APP_DIR}/config/thumbnails" 2>/dev/null; then
+    echo "!! THUMBS_STORAGE=${THUMBS_STORAGE} is saved, but ${CT_APP_DIR}/config/thumbnails"
+    echo "!! is NOT a mountpoint in CT $VMID — thumbnails are sharing the rootfs."
+    echo "!! To apply the dedicated volume to this existing CT:"
+    echo "!!   pct exec $VMID -- bash -c 'cd ${CT_APP_DIR} && docker compose --profile agents down'"
+    echo "!!   pct exec $VMID -- mv ${CT_APP_DIR}/config/thumbnails ${CT_APP_DIR}/config/thumbnails.pre-move"
+    echo "!!   pct set $VMID -mp<free-N> ${THUMBS_STORAGE}:${THUMBS_SIZE_GB:-64},mp=${CT_APP_DIR}/config/thumbnails,backup=0"
+    echo "!!   pct reboot $VMID    # then copy thumbnails.pre-move/. back in and rerun this deploy"
+    echo "!! (find a free mp index with: pct config $VMID | grep ^mp)"
+  fi
   # legacy migration (rename): stop old catalarr stack, disable old mount units,
   # carry the old .env across with renamed keys (keeps DB credentials working)
   pct exec "$VMID" -- bash -c '
@@ -1121,7 +1276,7 @@ echo
 echo "  Container"
 echo "    VMID:        $VMID  (hostname: $HOSTNAME_, $( [[ "$PRIVILEGED" == 1 ]] && echo privileged || echo unprivileged ))"
 echo "    Bridge/IP:   $BRIDGE / ${IP:-unknown} ($IP_MODE)"
-echo "    Resources:   ${CORES} cores, ${MEMORY_MB} MB RAM, ${DISK_GB} GB disk on ${STORAGE}"
+echo "    Resources:   ${CORES} cores, ${MEMORY_MB} MB RAM, ${DISK_GB} GB disk on ${STORAGE}$( [[ -n "${THUMBS_STORAGE:-}" ]] && echo ", thumbs ${THUMBS_SIZE_GB:-64} GB on ${THUMBS_STORAGE}" )"
 echo
 echo "  Services (docker compose in CT:$CT_APP_DIR)"
 pct exec "$VMID" -- bash -c "cd $CT_APP_DIR && docker compose ps --format '    {{.Service}}: {{.State}} ({{.Status}})'" 2>/dev/null || true

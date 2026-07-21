@@ -71,8 +71,17 @@ SEARCHABLE_ATTRIBUTES: tuple[str, ...] = (
     "archive_members",
 )
 FILTERABLE_ATTRIBUTES: tuple[str, ...] = (
-    "media_type", "library_id", "status", "extension", "year", "tags",
+    "library_id", "status", "extension", "year", "tags",
     "codec", "resolution", "genre", "size", "mtime", "is_sidecar", "sidecar_of",
+    # W8 File Extension Similarity Taxonomy (authoritative type filters after W8-B
+    # removed media_type): the coarse ``file_category`` parent + the finer
+    # ``file_group`` child. Both are low-cardinality controlled vocabularies ->
+    # filterable AND facet-searchable (see FACET_SEARCH_CANDIDATES). Derived purely
+    # from the extension at projection time (``file_groups`` / ``search.build_doc``,
+    # falling back to the stored item columns). ``/search?file_category=...`` /
+    # ``?file_group=...`` are the type filters.
+    "file_category",
+    "file_group",
     # P3-T1 hash search: the scan-time xxh3 digests become exact-match filter
     # targets (typo tolerance already off for both — they are HASH_ATTRIBUTES).
     # Facet search is explicitly DISABLED for both (see FACET_SEARCH_DISABLED):
@@ -128,7 +137,9 @@ FACET_SEARCH_DISABLED: tuple[str, ...] = (
 # human-meaningful fields worth a type-ahead. They KEEP facet search enabled
 # (absent from FACET_SEARCH_DISABLED) and, per R2, get their facet VALUES
 # count-ordered (most-common first) — the tag type-ahead consumer is P3-T12.
-FACET_SEARCH_CANDIDATES: tuple[str, ...] = ("tags", "genre", "media_type", "is_sidecar")
+FACET_SEARCH_CANDIDATES: tuple[str, ...] = (
+    "tags", "genre", "is_sidecar", "file_group", "file_category",
+)
 
 # searchCutoffMs circuit-breaker (brief §2f): generous but non-infinite so a
 # pathological filter/query cannot hang a request. SDK method verified:

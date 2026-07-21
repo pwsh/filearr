@@ -12,14 +12,18 @@ from filearr.models import HashPolicy
 class LibraryIn(BaseModel):
     name: str
     root_path: str
-    enabled_types: list[str] = Field(default_factory=list)  # empty = all
+    # W8-B taxonomy gating (replaced the MediaType-keyed ``enabled_types``). A file
+    # is included iff its file_group is in ``enabled_groups`` OR its file_category is
+    # in ``enabled_categories`` (a category admits all its groups). BOTH empty = all.
+    enabled_categories: list[str] = Field(default_factory=list)
+    enabled_groups: list[str] = Field(default_factory=list)
     include_globs: list[str] = Field(default_factory=list)
     exclude_globs: list[str] = Field(default_factory=list)
     # P2-T3/T5 indexing controls. ``enabled_presets`` holds preset-bundle
     # names plus ``-name`` opt-out sentinels for default-on bundles; empty =
     # "no explicit config" (default-on bundles like hidden_dotfiles still apply,
-    # resolved at scan time). ``enabled_extension_groups`` narrows a MediaType
-    # to the union of the listed groups' extensions (R5).
+    # resolved at scan time). ``enabled_extension_groups`` (W8-B: superseded for
+    # gating by ``enabled_groups``) is retained as a validated preset surface.
     enabled_presets: list[str] = Field(default_factory=list)
     enabled_extension_groups: list[str] = Field(default_factory=list)
     scan_cron: str | None = None
@@ -43,6 +47,12 @@ class LibraryIn(BaseModel):
     # P3-T11 (R5, CWE-1230): expose extracted GPS/location metadata for this
     # library. Default false = GPS stripped from projection + API (privacy-safe).
     expose_gps: bool = False
+    # Scan-accounting opt-in: also enumerate PRUNED subtrees (cheap scandir count,
+    # no stat/ingest) so `seen + excluded + pruned_files` reconciles exactly with
+    # the on-disk file count. Default false — that pass fully lists trees we
+    # deliberately skip, which is slow on rclone/SMB where big pruned trees
+    # (.git/.venv) live. Enable when an item count disagrees with the OS.
+    count_pruned_files: bool = False
 
 
 class LibraryUpdate(BaseModel):
@@ -51,7 +61,8 @@ class LibraryUpdate(BaseModel):
 
     name: str | None = None
     root_path: str | None = None
-    enabled_types: list[str] | None = None
+    enabled_categories: list[str] | None = None
+    enabled_groups: list[str] | None = None
     include_globs: list[str] | None = None
     exclude_globs: list[str] | None = None
     enabled_presets: list[str] | None = None
@@ -64,6 +75,7 @@ class LibraryUpdate(BaseModel):
     share_prefix: str | None = None
     ocr_enabled: bool | None = None
     expose_gps: bool | None = None
+    count_pruned_files: bool | None = None
     enabled: bool | None = None
 
 
@@ -84,6 +96,28 @@ class LastScan(BaseModel):
     new: int | None = None
     changed: int | None = None
     missing: int | None = None
+    # Files the walk enumerated but did NOT ingest, so `seen + excluded` = files
+    # enumerated. Split by cause so a surprising gap between an OS folder count
+    # and the library total is explainable: `excluded_gate` = the library's
+    # category/group selection rejected it, `excluded_filtered` = the exclusion
+    # spec (presets / exclude_globs / hidden dotfiles) did. `pruned_dirs` and
+    # `permission_denied` are directories whose CONTENTS were never enumerated at
+    # all — non-zero means the file accounting is a lower bound.
+    excluded: int | None = None
+    excluded_gate: int | None = None
+    excluded_filtered: int | None = None
+    pruned_dirs: int | None = None
+    permission_denied: int | None = None
+    bytes_seen: int | None = None
+    # Files inside pruned subtrees. Only meaningful when ``pruned_counted`` is
+    # true (the library's ``count_pruned_files`` opt-in); otherwise pruned trees
+    # are never enumerated, this stays 0, and ``seen + excluded`` is a LOWER
+    # BOUND on the files present on disk.
+    pruned_files: int | None = None
+    pruned_counted: bool | None = None
+    # Capped SAMPLE of pruned directory paths, so the UI can name the culprits
+    # (".git", ".venv") rather than reporting an opaque count.
+    pruned_paths: list[str] | None = None
 
 
 class LibraryOut(LibraryIn):
@@ -126,11 +160,12 @@ class PresetOut(BaseModel):
 
 
 class ExtensionGroupOut(BaseModel):
-    """One extension group (P2-T5): a set of extensions refining one MediaType."""
+    """One extension group (P2-T5): a set of extensions refining one taxonomy
+    ``file_category`` (W8-B re-keyed this off the removed MediaType)."""
 
     name: str
     label: str
-    media_type: str
+    file_category: str
     extensions: list[str]
 
 
@@ -161,6 +196,16 @@ class ScanPathUpdate(BaseModel):
     enabled: bool | None = None
 
 
+class TargetedScanIn(BaseModel):
+    """W9 targeted rescan request. ``path`` is a rel_path under the library root
+    (a file OR a directory; ``''`` = the whole library, same as a normal scan);
+    it is normalized + traversal-checked at the API layer (security). ``recursive``
+    is ignored when ``path`` resolves to a file."""
+
+    path: str = ""
+    recursive: bool = True
+
+
 class ScanPathOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
@@ -176,7 +221,9 @@ class ItemOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     library_id: uuid.UUID
-    media_type: str
+    # W8-B taxonomy classification (authoritative; the media_type enum is gone).
+    file_category: str | None = None
+    file_group: str | None = None
     status: str
     path: str
     rel_path: str
@@ -256,13 +303,13 @@ class MetadataProfileFieldOut(BaseModel):
 
 
 class MetadataProfileOut(BaseModel):
-    """``GET /api/v1/metadata-profiles`` row: a code-shipped, MediaType-keyed
-    schema (P4-T1). ``fields`` is the FieldSpec projection keyed by field name;
-    read-only (no POST/PATCH/DELETE — profiles are code-owned)."""
+    """``GET /api/v1/metadata-profiles`` row: a code-shipped, ``file_category``-keyed
+    schema (P4-T1; W8-B re-keyed off the removed MediaType). ``fields`` is the
+    FieldSpec projection keyed by field name; read-only (profiles are code-owned)."""
 
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
-    media_type: str
+    file_category: str
     version: int
     created_at: datetime
     # The stored ``schema`` JSONB, exposed as ``fields`` (``schema`` shadows a
@@ -330,7 +377,8 @@ class CustomFieldOut(BaseModel):
 
 class SearchHit(BaseModel):
     id: str
-    media_type: str
+    file_category: str | None = None
+    file_group: str | None = None
     title: str | None = None
     filename: str | None = None
     path: str | None = None
@@ -411,7 +459,8 @@ class TreeItem(BaseModel):
     id: uuid.UUID
     rel_path: str
     filename: str
-    media_type: str
+    file_category: str | None = None
+    file_group: str | None = None
     size: int
     title: str | None = None
     year: int | None = None

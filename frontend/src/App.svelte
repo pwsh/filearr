@@ -8,6 +8,7 @@
   import TimelinePage from "./lib/TimelinePage.svelte";
   import ReportsPage from "./lib/ReportsPage.svelte";
   import AgentsPage from "./lib/AgentsPage.svelte";
+  import TaxonomyPage from "./lib/TaxonomyPage.svelte";
   import FilterBuilderPage from "./lib/FilterBuilderPage.svelte";
   import HelpPage from "./lib/HelpPage.svelte";
   import LoginPage from "./lib/LoginPage.svelte";
@@ -20,7 +21,7 @@
   // UI-T9 — hash-based routing so a refresh keeps the current tab and
   // back/forward toggles between them. `#/search` (default), `#/admin`,
   // `#/jobs` (UI-T10 jobs dashboard).
-  type Page = "search" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "filter-builder" | "help";
+  type Page = "search" | "admin" | "jobs" | "alerts" | "browse" | "timeline" | "reports" | "agents" | "taxonomy" | "filter-builder" | "help";
   function routeFromHash(): { page: Page; browseLib: string; browsePath: string } {
     const browse = parseBrowseHash(location.hash);
     if (browse) return { page: "browse", browseLib: browse.libraryId, browsePath: browse.path };
@@ -30,6 +31,7 @@
     if (location.hash === "#/timeline") return { page: "timeline", browseLib: "", browsePath: "" };
     if (location.hash === "#/reports") return { page: "reports", browseLib: "", browsePath: "" };
     if (location.hash === "#/agents") return { page: "agents", browseLib: "", browsePath: "" };
+    if (location.hash === "#/taxonomy") return { page: "taxonomy", browseLib: "", browsePath: "" };
     if (location.hash === "#/filter-builder") return { page: "filter-builder", browseLib: "", browsePath: "" };
     if (location.hash === "#/help") return { page: "help", browseLib: "", browsePath: "" };
     return { page: "search", browseLib: "", browsePath: "" };
@@ -206,6 +208,8 @@
     <ReportsPage />
   {:else if page === "agents"}
     <AgentsPage />
+  {:else if page === "taxonomy"}
+    <TaxonomyPage {me} authDisabled={authMode === "disabled"} />
   {:else if page === "filter-builder"}
     <FilterBuilderPage />
   {:else if page === "help"}

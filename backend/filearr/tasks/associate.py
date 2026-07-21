@@ -21,17 +21,16 @@ import os
 
 from sqlalchemy import select
 
-from filearr.models import Item, ItemStatus, MediaType
+from filearr.models import Item, ItemStatus
 from filearr.nfo import parse_nfo_bytes
 from filearr.sidecar import classify
 
-# Media types considered "primary" candidates for directory-level artwork.
-_PRIMARY_TYPES = frozenset(
-    {
-        MediaType.video, MediaType.audio, MediaType.audiobook,
-        MediaType.sample, MediaType.model3d, MediaType.document,
-        MediaType.spreadsheet, MediaType.image,
-    }
+# W8-B: taxonomy ``file_category`` values considered "primary" content candidates
+# for directory-level artwork (the real-media categories with an extractor). The
+# old audiobook/sample/spreadsheet media types fold into audio/document. Non-primary
+# categories (development/archive/system/other) are never a directory primary.
+_PRIMARY_CATEGORIES = frozenset(
+    {"video", "audio", "image", "document", "three-d-cad"}
 )
 
 
@@ -62,13 +61,15 @@ def resolve_links(items: list[Item]) -> dict[str, str | None]:
         classified[str(it.id)] = info
         if info is None:  # a real media file — eligible parent
             key = (_dir_of(it.rel_path), _stem_of(it.rel_path))
-            # Prefer a primary media type on stem collision (e.g. .mkv over .srt).
+            # Prefer a primary content category on stem collision (e.g. .mkv over
+            # .srt). Both are keyed on the taxonomy file_category now.
             existing = by_dir_stem.get(key)
             if existing is None or (
-                it.media_type in _PRIMARY_TYPES and existing.media_type not in _PRIMARY_TYPES
+                it.file_category in _PRIMARY_CATEGORIES
+                and existing.file_category not in _PRIMARY_CATEGORIES
             ):
                 by_dir_stem[key] = it
-            if it.media_type in _PRIMARY_TYPES:
+            if it.file_category in _PRIMARY_CATEGORIES:
                 dir_primaries.setdefault(_dir_of(it.rel_path), []).append(it)
 
     def primary_for(directory: str) -> Item | None:

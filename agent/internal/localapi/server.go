@@ -422,7 +422,7 @@ func toResultRow(res query.Result) ResultRow {
 		Extension:    strPtr(it.Extension),
 		Size:         it.Size,
 		Mtime:        time.Unix(0, it.MtimeNs).UTC().Format(time.RFC3339),
-		Kind:         strPtr(it.MediaType),
+		Kind:         strPtr(it.FileCategory),
 		QuickHash:    strPtr(it.QuickHash),
 		ContentHash:  strPtr(it.ContentHash),
 		FuzzyMatched: res.FuzzyMatched,

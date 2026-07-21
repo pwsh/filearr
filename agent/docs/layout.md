@@ -60,15 +60,48 @@ tombstone-not-delete, sidecar classification, batched-commit-then-emit ordering
 decision. Emits change records to `index` + `outbox` in one transaction. Key
 types: `Walker`, `DiffResult`, `HashTier`, `MoveDetector`.
 
+Classification + gating are driven by the **File Extension Similarity Taxonomy**
+(W8-E, `internal/taxonomy`), not a hardcoded media-type map. `scan.Options`
+carries a `Classifier` (the taxonomy cache's current snapshot) plus
+`EnabledCategories` / `EnabledGroups`; each walked file is classified into
+`(file_category, file_group)` and included iff **both** allow-lists are empty OR
+its category is in `EnabledCategories` OR its group is in `EnabledGroups`
+(mirroring central's library model; sidecars always bypass the gate). Sidecar
+association's "primary parent" test is now `Classifier.IsPrimaryCategory` (the
+categories with an extractor), so operator taxonomy edits flow into local
+classification, gating, AND sidecar linking.
+
+### `internal/taxonomy` (W8-E)
+The agent's local mirror of central's editable File Extension Similarity
+Taxonomy — replacing the removed static `scan/mediatypes.go`. A `Taxonomy` is an
+immutable snapshot keyed by a central version: flat maps (`ext→group`,
+`group→category`, `category→extractor`) + the primary (sidecar-parent) category
+set, with `Classify(path) → (category, group)` mirroring central's `detect`
+(compound `.tar.gz` first, else final extension, else `other`). A `Cache` loads
+`<data_dir>/taxonomy.json` on start, falls back to a **baked-in seed**
+(`seed.json`, GENERATED from `backend/filearr/file_groups.py` via
+`filearr.taxonomy` — regeneration command in `seed.go`) when never contacted, and
+`Refresh(ctx, client, version)` version-gates a compact-payload fetch from
+`GET /api/v1/agents/{id}/taxonomy`, atomically persisting it. The daemon's policy
+poller (`internal/config`) drives the refresh: every policy carries a
+`taxonomy_version`, and after each successful poll the poller triggers a refresh
+when it exceeds the cached snapshot's version (a taxonomy edit bumps the policy
+ETag's `/t:<v>` segment, forcing a 200). Key types: `Taxonomy`, `Cache`,
+`Client`.
+
 ### `internal/index`
 The local SQLite store and its FTS5 virtual table (§3.3). Mirrors a **narrow**
 subset of central `items` (id, rel_path, filename, extension, size, mtime,
-quick_hash, content_hash, narrow metadata JSON, `status` mirroring `ItemStatus`,
-plus local-only `synced_at`/`local_seq_no`). FTS5 external-content table kept in
-sync via triggers. Runs `PRAGMA integrity_check` on startup; on failure the file
-is deleted and rebuilt from a fresh walk (disposable-index philosophy,
-invariant 1) and the rebuild is flagged upstream for observability. Key types:
-`Store`, `Item`, `FTSIndex`, `IntegrityGuard`.
+quick_hash, content_hash, **`file_category` + `file_group`** — the taxonomy pair
+that replaced the old `media_type` column in W8-E — narrow metadata JSON,
+`status` mirroring `ItemStatus`, plus local-only `synced_at`/`local_seq_no`).
+FTS5 external-content table kept in sync via triggers. Runs `PRAGMA
+integrity_check` on startup; an integrity failure OR an **outdated
+`user_version`** (the W8-E schema bump `4→5` has no in-place migration) deletes
+and rebuilds the file from a fresh walk (disposable-index philosophy,
+invariant 1), which re-classifies every item against the live taxonomy; the
+rebuild is flagged upstream for observability. Key types: `Store`, `Item`,
+`FTSIndex`, `IntegrityGuard`.
 
 ### `internal/outbox`
 The transactional outbox (§4.1) and replication client (§4.3). Writes the local
@@ -89,8 +122,11 @@ Policy sync (§6). Poll `GET /api/agents/{id}/policy` with `ETag`/`If-None-Match
 as the reliable background path; opportunistically hold an SSE stream open only
 while a local UI/CLI is active for near-instant apply. Applies the received
 policy (enabled libraries, `scan_paths`, preset bundles, local-access
-enable/disable flag) and reports `policy_version_applied` back. mTLS is the only
-integrity layer (**R4**). Key types: `PolicyClient`, `Policy`, `ETagCache`.
+enable/disable flag) and reports `policy_version_applied` back. Every policy also
+carries a computed `taxonomy_version` (W8-E) folded into the ETag's `/t:<v>`
+segment; the poller's `AfterFetch` hook version-gates the `internal/taxonomy`
+cache refresh off it. mTLS is the only integrity layer (**R4**). Key types:
+`PolicyClient`, `Policy`, `ETagCache`, `Poller`.
 
 ### `internal/update`
 Self-update (§5). Fetches a **minisign-style signed manifest** (Tauri pattern —
@@ -172,3 +208,32 @@ definition: `<bin> run --data … --log-dir … [--config …]`, an env marker
 > (`internal/update`, `ServiceManaged`) exits with `ServiceRestartExitCode` after
 > an A/B swap instead of self-re-execing, letting the manager restart the new
 > binary (a re-exec would race the manager and risk two instances).
+
+### `internal/inventory/permissions` (W7 — SCAFFOLD, inert)
+
+The full-ACE `permissions` collector's scaffold (brief:
+`docs/research/permissions-enumeration-audit.md`, esp. §3.1/§3.2/§9/§9.1). It
+emits the FULL normalized ACE list (owner + every allow/deny entry, native mask
+preserved verbatim, inheritance/scope flags) — distinct from, and superseding,
+the parent package's summary-only `perms`/`owner` collectors.
+
+**Status: SCAFFOLD.** The pure, OS-independent cores are implemented for real
+and unit-tested — the normalized record schema (`record.go`), native-mask→verb
+mapping tables (`masks.go`: NTFS incl. generic-rights expansion, POSIX mode,
+NFSv4/macOS bit table [partial, TODO]), well-known-principal classification
+(`wellknown.go`), the POSIX ACL xattr binary decoder (`posixacl.go`), and
+mount-fidelity detection (`fidelity.go`). Every OS-I/O boundary is an INERT stub
+returning `ErrPermissionsScaffold`, TODO(W7-Tn)-tagged with the exact API the
+real read will use (`permissions_windows.go` GetNamedSecurityInfo full-ACE walk;
+`permissions_posix.go` Lgetxattr→decoder + `/proc/mounts` fidelity gating;
+`permissions_darwin.go` `ls -le` exec per §9; `permissions_other.go`
+unsupported). No real syscall, exec, or CGO is issued yet.
+
+**Not advertised.** `Collector` satisfies `inventory.Collector` structurally but
+is DELIBERATELY NOT added to `inventory.DefaultRegistry()`, so it is absent from
+`inventory.Capabilities()` — central can never offer or run it while inert (a
+guard test, `TestPermissionsNotAdvertised`, asserts this). The registration seam
+is the `// W7: register in DefaultRegistry once the per-OS reads are implemented`
+comment in `collector.go`. §9.1's open questions (storage shape, central-scanner
+parity, exclusion escape hatch, SACL privilege model, Samba share-ACL,
+drift-retention default) remain for the architect before greenlight.

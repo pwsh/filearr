@@ -58,18 +58,6 @@ class LtreeCompat(UserDefinedType):
         return "TEXT"
 
 
-class MediaType(str, enum.Enum):
-    video = "video"
-    audio = "audio"
-    audiobook = "audiobook"
-    sample = "sample"
-    image = "image"
-    model3d = "model3d"
-    document = "document"
-    spreadsheet = "spreadsheet"
-    other = "other"
-
-
 class ItemStatus(str, enum.Enum):
     active = "active"
     missing = "missing"   # not seen on last scan (tombstone)
@@ -120,8 +108,14 @@ class Library(Base):
     )
     name: Mapped[str] = mapped_column(Text, unique=True)
     root_path: Mapped[str] = mapped_column(Text)
-    # user-selectable media type inclusion (empty = all types)
-    enabled_types: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    # W8-B File Extension Similarity Taxonomy gating (replaces the old MediaType-keyed
+    # ``enabled_types``). A file is INCLUDED iff its ``file_group`` is in
+    # ``enabled_groups`` OR its ``file_category`` is in ``enabled_categories``
+    # (selecting a category admits every group under it). BOTH empty = include
+    # everything (the old empty-``enabled_types`` default). Text arrays (not enums)
+    # so operator-edited taxonomy keys need no ALTER TYPE. Sidecars bypass the gate.
+    enabled_categories: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
+    enabled_groups: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
     include_globs: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
     exclude_globs: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
     # P2-T1 preset bundles (indexing controls). Empty '{}' = "no explicit config":
@@ -130,7 +124,10 @@ class Library(Base):
     # negative sentinels e.g. '-hidden_dotfiles'). NOT the effective set, so the
     # shipped-on default set can evolve without a data migration.
     enabled_presets: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
-    # P2-T3 extension-group refinement (finer than MediaType; union semantics, R5).
+    # P2-T3 extension-group presets (a curated per-category ext refinement; union
+    # semantics, R5). SUPERSEDED for scan gating by the taxonomy ``enabled_groups``
+    # above (W8-B) — retained as a validated API/preset surface only, no longer
+    # consulted by the scan walk.
     enabled_extension_groups: Mapped[list[str]] = mapped_column(
         ARRAY(Text), server_default=text("'{}'")
     )
@@ -174,6 +171,13 @@ class Library(Base):
     # invariant 2) but are stripped from the Meili projection + public API unless
     # this is true. Default false = privacy-safe; ships with GPS extraction (R5).
     expose_gps: Mapped[bool] = mapped_column(server_default=text("false"))
+    # Scan-accounting opt-in: enumerate PRUNED subtrees (cheap scandir count, no
+    # stat/ingest) so `seen + excluded + pruned_files` reconciles exactly with the
+    # on-disk file count. Default false because that pass costs a full directory
+    # listing of trees we deliberately skip — expensive on rclone/SMB, which is
+    # exactly where large pruned trees (.git/.venv) live. Turn it on when a
+    # library's item count doesn't match what the OS reports.
+    count_pruned_files: Mapped[bool] = mapped_column(server_default=text("false"))
     enabled: Mapped[bool] = mapped_column(server_default=text("true"))
     # P5-T4 distributed agents: a library whose CONTENT is owned by a remote agent
     # (replicated in via the agent outbox), not scanned by central. ``root_path``
@@ -213,7 +217,15 @@ class Item(Base):
             "rel_path",
             postgresql_ops={"rel_path": "text_pattern_ops"},
         ),
-        Index("ix_items_media_type", "media_type"),
+        # W8 File Extension Similarity Taxonomy: the DB-backed, editable successor
+        # to the removed ``media_type`` enum. ``file_category`` (coarse parent) and
+        # ``file_group`` (finer child) are stored per item, classified at scan/
+        # replication time by the DB-reading ``filearr.taxonomy`` service. Both
+        # nullable (a create_all test DB carries NULL until re-scanned) and indexed
+        # for the search-facet filter path. These are now AUTHORITATIVE (W8-B
+        # dropped ``items.media_type`` + the ``media_type`` enum entirely).
+        Index("ix_items_file_category", "file_category"),
+        Index("ix_items_file_group", "file_group"),
         Index("ix_items_status", "status"),
         Index("ix_items_quick_hash", "quick_hash"),
         Index("ix_items_metadata", "metadata", postgresql_using="gin"),
@@ -232,7 +244,12 @@ class Item(Base):
         UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
     )
     library_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("libraries.id", ondelete="CASCADE"))
-    media_type: Mapped[MediaType] = mapped_column(Enum(MediaType, name="media_type"))
+    # W8 taxonomy: stored (category_key, group_key) from ``filearr.taxonomy``, the
+    # editable DB successor to the removed ``media_type`` enum. Text (not a PG enum)
+    # so operator edits to the taxonomy never need an ALTER TYPE. NULL until a scan/
+    # replication create stamps it (fresh redeploy; no backfill).
+    file_category: Mapped[str | None] = mapped_column(Text, nullable=True)
+    file_group: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[ItemStatus] = mapped_column(
         Enum(ItemStatus, name="item_status"), server_default=ItemStatus.active.value
     )
@@ -337,11 +354,115 @@ class Item(Base):
         return self.sidecar_of is not None
 
 
+# --------------------------------------------------------------------------- #
+# W8-A — File Extension Similarity Taxonomy (DB-backed, editable).             #
+#                                                                             #
+# The editable successor to ``MediaType``: a two-level tree (``file_categories`` #
+# parent → ``file_groups`` child → ``file_group_extensions`` membership) SEEDED  #
+# by migration ``a1f4c7e2b9d3`` FROM ``filearr.file_groups`` (the research map;  #
+# now the seed source of truth) and read at runtime by ``filearr.taxonomy`` into #
+# a version-keyed in-process cache. ``taxonomy_state.version`` is bumped on every #
+# CRUD edit for cache invalidation now + agent push later. Item classification    #
+# (``items.file_category`` / ``items.file_group``) reads these tables; the search #
+# projection uses the pure seed functions (no session). See                       #
+# docs-site/reference/file-extension-groups.md.                                   #
+# --------------------------------------------------------------------------- #
+class FileCategoryModel(Base):
+    """One coarse taxonomy category (the ``file_group`` parent). ``extractor`` is
+    the extraction pipeline the category routes to (``image``/``audio``/``video``/
+    ``document``/``model3d`` or NULL — W8-B routes on it). ``key`` is the stable
+    slug used everywhere (facets, item column, API). ``is_builtin`` marks a
+    seed-shipped row (operator-created rows are false)."""
+
+    __tablename__ = "file_categories"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
+    )
+    key: Mapped[str] = mapped_column(Text, unique=True)
+    label: Mapped[str] = mapped_column(Text)
+    description: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    extractor: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    is_builtin: Mapped[bool] = mapped_column(server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=func.now()
+    )
+
+
+class FileGroupModel(Base):
+    """One finer taxonomy group under a :class:`FileCategoryModel`. ``category_id``
+    is ``ON DELETE RESTRICT`` — a category cannot be deleted while it still parents
+    groups (reparent or delete them first). Deleting a group CASCADEs its extension
+    rows (see :class:`FileGroupExtension`)."""
+
+    __tablename__ = "file_groups"
+    __table_args__ = (
+        Index("ix_file_groups_category", "category_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
+    )
+    key: Mapped[str] = mapped_column(Text, unique=True)
+    label: Mapped[str] = mapped_column(Text)
+    description: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    category_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("file_categories.id", ondelete="RESTRICT")
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    is_builtin: Mapped[bool] = mapped_column(server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=func.now()
+    )
+
+
+class FileGroupExtension(Base):
+    """One extension → group membership. ``ext`` is the bare, lowercase extension
+    (no dot) and is globally UNIQUE — an extension belongs to at most one group, so
+    adding an ext that already exists REPARENTS it (an upsert that returns the prior
+    group). ``ON DELETE CASCADE``: deleting a group drops its extension rows."""
+
+    __tablename__ = "file_group_extensions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
+    )
+    ext: Mapped[str] = mapped_column(Text, unique=True)
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("file_groups.id", ondelete="CASCADE")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()")
+    )
+
+
+class TaxonomyState(Base):
+    """The single-row (``id=1``) taxonomy version counter. ``version`` is bumped on
+    every taxonomy CRUD edit; the runtime service caches keyed by it (reload when it
+    changes) and a future agent-push uses it as the change token. Seeded at
+    ``version=1`` by the W8-A migration."""
+
+    __tablename__ = "taxonomy_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), onupdate=func.now()
+    )
+
+
 class ItemVersion(Base):
     """Audit trail for metadata changes (P4-T8: user edits AND extractor writes).
 
     ``source`` discriminates the origin: ``'user'`` for an API/UI edit,
-    ``'scan'`` / ``'extract:<media_type>'`` for an attributed extractor write.
+    ``'scan'`` / ``'extract:<file_category>'`` for an attributed extractor write.
     Pre-P4-T8 rows were all manual edits and backfill to ``'user'``. Only
     non-``'user'`` rows are subject to the P4-T9 retention purge; ``'user'`` rows
     are never auto-purged.
@@ -361,7 +482,7 @@ class ItemVersion(Base):
     actor: Mapped[str] = mapped_column(Text)
     patch: Mapped[dict] = mapped_column(JSONB)
     # P4-T8: origin discriminator. Server default backfills pre-existing rows to
-    # 'user'; extractor-sourced rows set 'scan'/'extract:<media_type>'.
+    # 'user'; extractor-sourced rows set 'scan'/'extract:<file_category>'.
     source: Mapped[str] = mapped_column(Text, server_default=text("'user'"))
 
     # P4-T9: composite index backing the retention purge (source != 'user' AND
@@ -373,14 +494,15 @@ class ItemVersion(Base):
 
 
 class MetadataProfile(Base):
-    """Code-shipped, versioned, ``MediaType``-keyed schema describing the
-    well-known fields an extractor emits (P4-T1).
+    """Code-shipped, versioned, ``file_category``-keyed schema describing the
+    well-known fields an extractor emits (P4-T1; re-keyed off the taxonomy
+    ``file_category`` by W8-B, which removed ``MediaType``).
 
     Admin-*visible*, never admin-*editable*: seeded/upserted at startup from
-    :data:`filearr.profiles.METADATA_PROFILES` (mirrors how ``MediaType`` /
-    ``HashPolicy`` are code-owned enums). Migrations only ever ADD rows or bump
-    ``version`` (R2) — there is no admin DELETE/UPDATE endpoint for ``schema``.
-    The ``schema`` JSONB mirrors the ``FieldSpec`` projection
+    :data:`filearr.profiles.METADATA_PROFILES` (mirrors how ``HashPolicy`` is a
+    code-owned enum). Migrations only ever ADD rows or bump ``version`` (R2) —
+    there is no admin DELETE/UPDATE endpoint for ``schema``. The ``schema`` JSONB
+    mirrors the ``FieldSpec`` projection
     (``{field: {type, required, facetable, sortable, label}}``).
     """
 
@@ -389,8 +511,9 @@ class MetadataProfile(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=text("uuidv7()")
     )
-    # FK-like to a MediaType enum value; UNIQUE so seed is a clean upsert target.
-    media_type: Mapped[str] = mapped_column(Text, unique=True)
+    # The taxonomy ``file_category`` key this profile describes; UNIQUE so the seed
+    # is a clean upsert target.
+    file_category: Mapped[str] = mapped_column(Text, unique=True)
     # Bumped on any field-shape change (R2); a bump triggers nothing automatic.
     version: Mapped[int] = mapped_column(Integer)
     # SQLAlchemy attribute is ``schema_`` (``.schema`` collides with nothing at

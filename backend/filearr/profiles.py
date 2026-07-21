@@ -9,8 +9,9 @@ actually emits — see the module docstrings in ``filearr/tasks/*.py``) plus the
 path.
 
 Design (research brief §6.1, DSpace/Paperless precedent):
-- A **profile** is a code-shipped, versioned schema keyed by ``MediaType`` that
-  describes the well-known fields an extractor emits. Profiles validate the
+- A **profile** is a code-shipped, versioned schema keyed by taxonomy
+  ``file_category`` that describes the well-known fields an extractor emits
+  (W8-B re-keyed these off the removed ``MediaType``). Profiles validate the
   ``metadata_`` (extractor-owned) side of invariant 2 — they are the DSpace
   ``dc``/``dcterms`` "protected schema" analogue: admin-*visible*, never
   admin-*editable*. Custom fields (``custom_fields.py``) are the freeform
@@ -49,8 +50,6 @@ from functools import cache
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError, create_model
-
-from filearr.models import MediaType
 
 # FieldSpec.data_type vocabulary. Deliberately small and scalar-first; the two
 # array/structured cases in the real extractor output are folded into
@@ -207,19 +206,39 @@ _SPREADSHEET_FIELDS: list[FieldSpec] = [
 ]
 
 
-# One profile per MediaType member. ``sample`` reuses the audio vocabulary
-# (extract.py maps MediaType.sample -> extract_audio); ``other`` has no
-# extractor, so an empty profile (all keys pass through as unregistered).
-METADATA_PROFILES: dict[MediaType, list[FieldSpec]] = {
-    MediaType.audio: _AUDIO_FIELDS,
-    MediaType.sample: _AUDIO_FIELDS,
-    MediaType.audiobook: _AUDIOBOOK_FIELDS,
-    MediaType.image: _IMAGE_FIELDS,
-    MediaType.video: _VIDEO_FIELDS,
-    MediaType.model3d: _MODEL3D_FIELDS,
-    MediaType.document: _DOCUMENT_FIELDS,
-    MediaType.spreadsheet: _SPREADSHEET_FIELDS,
-    MediaType.other: [],
+def _merge_fields(*groups: list[FieldSpec]) -> list[FieldSpec]:
+    """Union several FieldSpec lists, de-duplicating by ``name`` (first wins).
+    Used where one taxonomy CATEGORY covers what were several old media types
+    (e.g. ``document`` now covers spreadsheets, ``audio`` covers audiobooks)."""
+    seen: dict[str, FieldSpec] = {}
+    for group in groups:
+        for spec in group:
+            seen.setdefault(spec.name, spec)
+    return list(seen.values())
+
+
+# W8-B: one profile per taxonomy ``file_category`` (the successor to the removed
+# ``MediaType`` keying). The old 9 media types reconcile onto the 9 categories:
+#   * ``audio`` — audio tags PLUS the audiobook chapter fields, because the
+#     ``audiobook`` file_group lives under the ``audio`` category and its items
+#     route to ``extract_audiobook`` (validated against the category profile).
+#     ``sample`` folded into ``audio`` too (same audio extractor).
+#   * ``document`` — union of the word-processor/PDF fields AND the spreadsheet
+#     fields (the ``spreadsheet`` file_group lives under ``document``; both go
+#     through ``extract_document``).
+#   * ``three-d-cad`` — the old model3d vocabulary.
+#   * ``development`` / ``archive`` / ``system`` / ``other`` — no extractor, so
+#     empty profiles (every key passes through as unregistered, as before).
+METADATA_PROFILES: dict[str, list[FieldSpec]] = {
+    "image": _IMAGE_FIELDS,
+    "audio": _AUDIOBOOK_FIELDS,
+    "video": _VIDEO_FIELDS,
+    "document": _merge_fields(_DOCUMENT_FIELDS, _SPREADSHEET_FIELDS),
+    "three-d-cad": _MODEL3D_FIELDS,
+    "development": [],
+    "archive": [],
+    "system": [],
+    "other": [],
 }
 
 # Profile schema version (brief §6.2 ``metadata_profiles.version``). Bump on any
@@ -237,10 +256,11 @@ class FieldError:
     type: str
 
 
-def get_profile(media_type: MediaType) -> list[FieldSpec]:
-    """Return the declared field specs for ``media_type`` (``[]`` for a type
-    with no extractor-owned vocabulary, e.g. ``other``)."""
-    return METADATA_PROFILES.get(media_type, [])
+def get_profile(file_category: str | None) -> list[FieldSpec]:
+    """Return the declared field specs for ``file_category`` (``[]`` for a category
+    with no extractor-owned vocabulary, e.g. ``development``/``other``, or a NULL
+    category on a not-yet-scanned row)."""
+    return METADATA_PROFILES.get(file_category, [])
 
 
 def build_validator(fields: list[FieldSpec], *, name: str = "ProfileModel") -> type[BaseModel]:
@@ -259,19 +279,20 @@ def build_validator(fields: list[FieldSpec], *, name: str = "ProfileModel") -> t
 
 
 @cache
-def _validator_for(media_type: MediaType) -> type[BaseModel]:
-    return build_validator(get_profile(media_type), name=f"{media_type.value.title()}Profile")
+def _validator_for(file_category: str | None) -> type[BaseModel]:
+    slug = (file_category or "none").replace("-", " ").title().replace(" ", "")
+    return build_validator(get_profile(file_category), name=f"{slug}Profile")
 
 
-def validate_metadata(media_type: MediaType, payload: dict[str, Any]) -> list[FieldError]:
-    """Validate an extracted ``metadata_`` payload against its profile.
+def validate_metadata(file_category: str | None, payload: dict[str, Any]) -> list[FieldError]:
+    """Validate an extracted ``metadata_`` payload against its category profile.
 
     Returns a list of structured :class:`FieldError` (empty == valid). The
     ``_extract_error`` sentinel and any unregistered key pass through untouched.
     Pure: no IO, no DB. Used by P4-T2 inside ``extract_item()`` (report a
     violation via ``_extract_error``, never raise / never drop the value).
     """
-    validator = _validator_for(media_type)
+    validator = _validator_for(file_category)
     try:
         validator.model_validate(payload)
     except ValidationError as exc:
@@ -330,7 +351,7 @@ async def seed_profiles_to_db(session_factory: Any = None) -> None:
     Called at app startup (lifespan) and from ``scripts.init_db`` after
     migrations. Idempotent and code-owned: migrations only ever ADD rows or bump
     ``version`` (R2), so this upserts every code-defined profile keyed by
-    ``media_type`` and records :data:`PROFILE_VERSION`. The ``ON CONFLICT`` guard
+    ``file_category`` and records :data:`PROFILE_VERSION`. The ``ON CONFLICT`` guard
     only overwrites a row whose stored ``version`` is ``<=`` the code version, so
     a hand-bumped newer row is never silently downgraded; re-running with an
     unchanged code version leaves the row byte-identical (no dup rows, ``version``
@@ -347,15 +368,15 @@ async def seed_profiles_to_db(session_factory: Any = None) -> None:
 
     factory = session_factory or SessionLocal
     async with factory() as session:
-        for media_type, fields in METADATA_PROFILES.items():
+        for file_category, fields in METADATA_PROFILES.items():
             schema = profile_schema(fields)
             stmt = pg_insert(MetadataProfile).values(
-                media_type=media_type.value,
+                file_category=file_category,
                 version=PROFILE_VERSION,
                 schema_=schema,
             )
             stmt = stmt.on_conflict_do_update(
-                index_elements=["media_type"],
+                index_elements=["file_category"],
                 set_={
                     MetadataProfile.version: PROFILE_VERSION,
                     MetadataProfile.schema_: schema,

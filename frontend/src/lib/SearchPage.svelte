@@ -15,6 +15,8 @@
     copyCounts as apiCopyCounts,
     searchTags,
     semanticStats,
+    fileGroups as apiFileGroups,
+    getTaxonomy,
     type SearchResponse,
     type Library,
     type SavedSearch,
@@ -32,9 +34,27 @@
   // ---------------------------------------------------------------------- //
 
   type Hit = Record<string, unknown>;
-  const TYPES = [
-    "video", "audio", "audiobook", "sample",
-    "image", "model3d", "document", "spreadsheet",
+  // W8: type filtering is the two-level file taxonomy. ``file_category`` (coarse,
+  // primary chip row) and ``file_group`` (granular, secondary multi-select) are
+  // both MULTI-select + repeatable; the old single-select ``media_type`` is gone.
+  // A normalized option shape shared by both rows (key sent, label shown).
+  type TaxOption = { key: string; label: string; description: string };
+  // Small static fallbacks so the filters still render if the taxonomy/file-group
+  // services are offline — the live vocabulary is always preferred (see onMount).
+  const CATEGORY_FALLBACK: TaxOption[] = [
+    { key: "video", label: "Video", description: "" },
+    { key: "audio", label: "Audio", description: "" },
+    { key: "image", label: "Image", description: "" },
+    { key: "document", label: "Document", description: "" },
+    { key: "archive", label: "Archive", description: "" },
+  ];
+  const FILE_GROUP_FALLBACK: TaxOption[] = [
+    { key: "archive", label: "Archive", description: "" },
+    { key: "source-code", label: "Source code", description: "" },
+    { key: "ebook", label: "E-book", description: "" },
+    { key: "raw-photo", label: "Raw photo", description: "" },
+    { key: "document", label: "Document", description: "" },
+    { key: "subtitle", label: "Subtitle", description: "" },
   ];
   // Explicit sort options (P3-T7 deep-linkable). "" = relevance; "newest" uses the
   // FIX-3 clamped mtime_sort so bogus future mtimes cannot float to the top.
@@ -51,7 +71,13 @@
   const HASH_RE = /^[0-9a-f]{16,64}$/;
 
   let q = $state("");
-  let mediaType = $state(""); // "" = all
+  // W8 file taxonomy filters. Both multi-select; each rides the deep-link hash as
+  // one comma-joined value and api.search() expands it into a repeatable param.
+  // Empty set = "all". Options populated from GET /taxonomy (see onMount).
+  let categoryOptions = $state<TaxOption[]>([]);
+  let selectedCategories = $state<string[]>([]);
+  let fileGroupOptions = $state<TaxOption[]>([]);
+  let selectedGroups = $state<string[]>([]);
   let extension = $state(""); // "" = any extension
   let extQuery = $state("");  // type-ahead-lite filter text over the ext facet
   let includeSidecars = $state(false); // T3 sidecars hidden by default
@@ -165,10 +191,15 @@
   function buildParams(): Record<string, string> {
     const term = q.trim();
     hashMode = HASH_RE.test(term);
-    const p: Record<string, string> = { type: mediaType };
+    const p: Record<string, string> = {};
     if (hashMode) p.hash = term;
     else p.q = q;
     if (extension) p.extension = extension;
+    // Multi-select taxonomy filters ride as one comma-joined value each;
+    // api.search() expands them into repeatable ``file_category`` /
+    // ``file_group`` query params for the backend's List[str].
+    if (selectedCategories.length) p.file_category = selectedCategories.join(",");
+    if (selectedGroups.length) p.file_group = selectedGroups.join(",");
     if (selectedTags.length) p.tags = selectedTags.join(",");
     if (includeSidecars) p.include_sidecars = "true";
     // Range filters: only send a bound when the slider is narrowed off it, so a
@@ -219,8 +250,13 @@
   // the UI state and re-query. Range params ride pendingRange until a slider moves.
   function applyParams(p: Record<string, string>) {
     q = p.hash ?? p.q ?? "";
-    mediaType = p.type ?? "";
     extension = p.extension ?? "";
+    selectedCategories = p.file_category
+      ? p.file_category.split(",").map((t) => t.trim()).filter(Boolean)
+      : [];
+    selectedGroups = p.file_group
+      ? p.file_group.split(",").map((t) => t.trim()).filter(Boolean)
+      : [];
     selectedTags = p.tags ? p.tags.split(",").map((t) => t.trim()).filter(Boolean) : [];
     tagQuery = "";
     tagOpen = false;
@@ -404,7 +440,9 @@
     const ctrl = new AbortController();
     tagController = ctrl;
     try {
-      const scope = mediaType ? { type: mediaType } : {};
+      // Scope tag suggestions to the first selected category when present (the
+      // backend's tag facet scope accepts a single coarse type).
+      const scope = selectedCategories.length ? { type: selectedCategories[0] } : {};
       const res = await searchTags(tagQuery, scope, ctrl.signal);
       if (ctrl.signal.aborted) return;
       // Hide already-selected tags from the suggestion list.
@@ -474,6 +512,27 @@
     reset();
   }
 
+  // file_category multi-select (coarse): toggle a key, then re-query.
+  function toggleCategory(key: string) {
+    selectedCategories = selectedCategories.includes(key)
+      ? selectedCategories.filter((c) => c !== key)
+      : [...selectedCategories, key];
+    reset();
+  }
+  const categoryLabel = (key: string): string =>
+    categoryOptions.find((c) => c.key === key)?.label ?? key;
+
+  // file_group multi-select (granular): toggle a key, then re-query.
+  function toggleGroup(key: string) {
+    selectedGroups = selectedGroups.includes(key)
+      ? selectedGroups.filter((g) => g !== key)
+      : [...selectedGroups, key];
+    reset();
+  }
+  // Resolve a group key to its human label for the active-filter chips.
+  const groupLabel = (key: string): string =>
+    fileGroupOptions.find((g) => g.key === key)?.label ?? key;
+
   function snapSize() {
     if (sizeBounds) {
       sizeLo = sizeBounds.min;
@@ -495,8 +554,9 @@
   type Chip = { key: string; label: string; clear: () => void };
   const activeFilters = $derived.by<Chip[]>(() => {
     const out: Chip[] = [];
-    if (mediaType) out.push({ key: "type", label: `type: ${mediaType}`, clear: () => { mediaType = ""; reset(); } });
+    for (const c of selectedCategories) out.push({ key: `fc:${c}`, label: `category: ${categoryLabel(c)}`, clear: () => toggleCategory(c) });
     if (extension) out.push({ key: "ext", label: `ext: ${extension}`, clear: () => { extension = ""; reset(); } });
+    for (const g of selectedGroups) out.push({ key: `fg:${g}`, label: `group: ${groupLabel(g)}`, clear: () => toggleGroup(g) });
     for (const t of selectedTags) out.push({ key: `tag:${t}`, label: `tag: ${t}`, clear: () => removeTag(t) });
     if (includeSidecars) out.push({ key: "sidecar", label: "sidecars shown", clear: () => { includeSidecars = false; reset(); } });
     if (sizeActive) out.push({ key: "size", label: `size ${fmtBytes(sizeLo)}–${fmtBytes(sizeHi)}`, clear: snapSize });
@@ -623,6 +683,32 @@
       // Non-fatal: copy-path just falls back to the container path.
     }
     loadSaved();
+    // W8: category + group vocabularies come from the taxonomy tree (source of
+    // truth). Prefer it; if it's offline, fall back to /system/file-groups for the
+    // groups and a small static category list so the filters still render.
+    try {
+      const tax = await getTaxonomy();
+      categoryOptions = tax.tree.map((n) => ({
+        key: n.category.key,
+        label: n.category.label,
+        description: n.category.description,
+      }));
+      fileGroupOptions = tax.tree.flatMap((n) =>
+        n.groups.map((g) => ({ key: g.key, label: g.label, description: g.description })),
+      );
+      if (!categoryOptions.length) categoryOptions = CATEGORY_FALLBACK;
+      if (!fileGroupOptions.length) fileGroupOptions = FILE_GROUP_FALLBACK;
+    } catch {
+      categoryOptions = CATEGORY_FALLBACK;
+      try {
+        const gs = await apiFileGroups();
+        fileGroupOptions = gs.length
+          ? gs.map((g) => ({ key: g.id, label: g.label, description: g.description }))
+          : FILE_GROUP_FALLBACK;
+      } catch {
+        fileGroupOptions = FILE_GROUP_FALLBACK;
+      }
+    }
     // P3-T8: learn whether semantic search is enabled so the slider can show.
     try {
       const sem = await semanticStats();
@@ -659,23 +745,27 @@
     oninput={onInput}
   />
 
-  <!-- Kind chips with live facet counts (P3-T4). -->
+  <!-- W8 file_category chips (coarse, MULTI-select) with live facet counts. The
+       primary type filter row; the granular file_group row sits below it. -->
   <div class="mt-3 flex flex-wrap items-center gap-2">
     <button
-      class="rounded-full border px-3 py-1 text-sm {mediaType === ''
+      class="rounded-full border px-3 py-1 text-sm {selectedCategories.length === 0
         ? 'border-transparent bg-[var(--accent)] text-white'
         : 'border-slate-300 dark:border-slate-700'}"
-      onclick={() => { mediaType = ""; reset(); }}>all</button>
-    {#each TYPES as t}
-      {@const count = facets.media_type?.[t] ?? 0}
+      onclick={() => { selectedCategories = []; reset(); }}>all</button>
+    {#each categoryOptions as c (c.key)}
+      {@const count = facets.file_category?.[c.key]}
+      {@const on = selectedCategories.includes(c.key)}
       <button
-        class="rounded-full border px-3 py-1 text-sm {mediaType === t
+        class="rounded-full border px-3 py-1 text-sm {on
           ? 'border-transparent bg-[var(--accent)] text-white'
-          : 'border-slate-300 dark:border-slate-700'} {count === 0 && mediaType !== t
+          : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
           ? 'opacity-40'
           : ''}"
-        onclick={() => { mediaType = mediaType === t ? '' : t; reset(); }}>
-        {t}<span class="ml-1 text-xs opacity-70">{count}</span>
+        title={c.description || c.label}
+        aria-pressed={on}
+        onclick={() => toggleCategory(c.key)}>
+        {c.label}{#if count != null}<span class="ml-1 text-xs opacity-70">{count}</span>{/if}
       </button>
     {/each}
     <span class="grow"></span>
@@ -736,6 +826,31 @@
       aria-expanded={filtersOpen}
       onclick={() => (filtersOpen = !filtersOpen)}>Filters {filtersOpen ? "▲" : "▾"}</button>
   </div>
+
+  <!-- File-group chips (MULTI-select). Mirrors the media-type row's chip styling;
+       the vocabulary comes from /system/file-groups (id sent, label shown).
+       Counts are shown only when the backend surfaces a file_group facet, so no
+       fabricated zeros appear when facet stats aren't available. -->
+  {#if fileGroupOptions.length}
+    <div class="mt-2 flex flex-wrap items-center gap-2">
+      <span class="text-xs font-medium text-slate-500">Group</span>
+      {#each fileGroupOptions as g (g.key)}
+        {@const count = facets.file_group?.[g.key]}
+        {@const on = selectedGroups.includes(g.key)}
+        <button
+          class="rounded-full border px-3 py-1 text-sm {on
+            ? 'border-transparent bg-[var(--accent)] text-white'
+            : 'border-slate-300 dark:border-slate-700'} {count === 0 && !on
+            ? 'opacity-40'
+            : ''}"
+          title={g.description || g.label}
+          aria-pressed={on}
+          onclick={() => toggleGroup(g.key)}>
+          {g.label}{#if count != null}<span class="ml-1 text-xs opacity-70">{count}</span>{/if}
+        </button>
+      {/each}
+    </div>
+  {/if}
 
   <!-- FIX-12 (Item B): expandable filter-DSL help; chips insert into the box. -->
   <DslHelp onInsert={insertDsl} context="search" />
@@ -951,7 +1066,7 @@
                 >{str(hit, "title") || str(hit, "filename")}</span>
               <span class="flex items-center gap-1">
                 <span class="shrink-0 rounded bg-slate-200 px-1.5 py-0.5 text-[10px] dark:bg-slate-800"
-                  >{str(hit, "media_type")}</span>
+                  >{str(hit, "file_category")}</span>
                 {#if num(hit, "year")}<span class="text-xs text-slate-500">({num(hit, "year")})</span>{/if}
                 {#if copyCountMap[hitId(hit)] > 1}
                   <span class="ml-auto shrink-0 rounded-full bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300"
@@ -998,7 +1113,7 @@
         >
           <Thumb id={hitId(hit)} size="h-9 w-9" />
           <span class="shrink-0 rounded bg-slate-200 px-2 py-0.5 text-xs dark:bg-slate-800"
-            >{str(hit, "media_type")}</span>
+            >{str(hit, "file_category")}</span>
           <span class="flex min-w-0 flex-1 flex-col">
             <span class="flex items-center gap-2">
               <span class="truncate font-medium" title={str(hit, "title") || str(hit, "filename")}

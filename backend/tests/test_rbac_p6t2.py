@@ -28,7 +28,6 @@ from filearr.main import create_app
 from filearr.models import (
     Item,
     Library,
-    MediaType,
     PathGrant,
     Principal,
     User,
@@ -138,7 +137,7 @@ async def test_migration_round_trip_scope_and_index(db_maker, pg_uri):
 
         it = Item(
             library_id=lib.id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             path="/data/lib/Action/2020/f.mkv",
             rel_path="Action/2020/f.mkv",
             filename="f.mkv",
@@ -347,7 +346,7 @@ async def test_rbac_backfill_stamps_and_batches(client, monkeypatch):
     async with maker() as s:
         for r in rels:
             s.add(Item(
-                library_id=lib, media_type=MediaType.video,
+                library_id=lib, file_category="video", file_group="video",
                 path=f"/data/movies/{r}", rel_path=r, filename="film.mkv",
                 size=1, mtime=datetime.now(UTC),
             ))

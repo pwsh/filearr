@@ -12,11 +12,12 @@ from procrastinate.jobs import Job
 from procrastinate.retry import BaseRetryStrategy, RetryDecision
 from sqlalchemy import select, text
 
+from filearr import taxonomy
 from filearr.config import get_settings
 from filearr.db import SessionLocal
 from filearr.errors import sanitize_error
 from filearr.hashpolicy import resolve_hash_policy
-from filearr.models import Item, ItemVersion, Library, MediaType, ScanRun
+from filearr.models import Item, ItemVersion, Library, ScanRun
 from filearr.profiles import validate_metadata
 from filearr.provenance import policy_version
 from filearr.tasks.archives import ArchiveError, is_archive, list_archive_members
@@ -373,16 +374,44 @@ def extract_document(path: str) -> dict[str, Any]:
     return meta
 
 
-EXTRACTORS = {
-    MediaType.audio: extract_audio,
-    MediaType.audiobook: extract_audiobook,
-    MediaType.sample: extract_audio,
-    MediaType.image: extract_image,
-    MediaType.video: extract_video,
-    MediaType.model3d: extract_model3d,
-    MediaType.document: extract_document,
-    MediaType.spreadsheet: extract_document,
+# W8-B extraction routing off the File Extension Similarity Taxonomy.
+#
+# The taxonomy CATEGORY carries an ``extractor`` KIND string (image/audio/video/
+# document/model3d or None) — resolved per item via ``taxonomy.category_extractor``
+# — which maps to the extractor fn here. This folds the old sample->audio and
+# spreadsheet->document routings in automatically (``.wav`` is now file_category
+# ``audio``; a spreadsheet is file_category ``document``).
+EXTRACTOR_BY_KIND = {
+    "image": extract_image,
+    "audio": extract_audio,
+    "video": extract_video,
+    "model3d": extract_model3d,
+    "document": extract_document,
 }
+
+# GROUP-level overrides: where a specific file_group needs a DIFFERENT extractor
+# than its category's default. ``audiobook`` lives under the ``audio`` category
+# (extractor kind ``audio`` -> extract_audio, tags only) but must run
+# ``extract_audiobook`` to also pull embedded chapters — the one place the old
+# per-MediaType routing made a distinction the category layer alone loses. Keyed
+# on ``item.file_group`` and consulted BEFORE the category extractor.
+EXTRACTOR_BY_GROUP = {
+    "audiobook": extract_audiobook,
+}
+
+
+async def _resolve_extractor(session, item):
+    """The extractor fn for ``item`` (W8-B): a ``file_group`` override wins, else
+    the item's ``file_category`` extractor kind from the live taxonomy. ``None``
+    when the category has no extractor (development/archive/system/other) or the
+    row is unclassified."""
+    override = EXTRACTOR_BY_GROUP.get(item.file_group)
+    if override is not None:
+        return override
+    if not item.file_category:
+        return None
+    kind = await taxonomy.category_extractor(session, item.file_category)
+    return EXTRACTOR_BY_KIND.get(kind) if kind else None
 
 
 EXTRACT_MAX_ATTEMPTS = 2  # genuine-failure retry budget (was retry=2)
@@ -445,9 +474,10 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
             return  # row from an aborted batch — nothing to extract
 
         # Captured before the post-commit attribute expiry so the thumbnail
-        # ride-along defer (after this session block) can gate on media type
-        # without re-loading a detached row. media_type never changes per item.
-        item_media_type = item.media_type
+        # ride-along defer (after this session block) can gate on the taxonomy
+        # classification without re-loading a detached row. file_category is
+        # extension-derived and stable per item.
+        item_file_category = item.file_category
         # Also captured pre-expiry: the thumbnail ride-along gates PDFs on the
         # extension (only ``.pdf`` renders among ``document`` items -- P12-T5).
         item_rel_path = item.rel_path
@@ -524,7 +554,7 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
         except OSError:
             pass
 
-        extractor = EXTRACTORS.get(item.media_type)
+        extractor = await _resolve_extractor(session, item)
         extract_failed = False
         meta: dict[str, Any] = {}
         if extractor is not None:
@@ -547,7 +577,7 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
         # library.expose_gps (R5, CWE-1230), never in the extractor. Supplementary
         # and independent: an exiftool failure records _exif_error but does NOT
         # fail the extract.
-        if item.media_type == MediaType.image:
+        if item.file_category == "image":
             from filearr.tasks.exif_run import exif_metadata
 
             meta.update(exif_metadata(item.path, settings=settings))
@@ -563,7 +593,7 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
             meta.update(
                 ocr_metadata(
                     item.path,
-                    media_type=item.media_type,
+                    file_category=item.file_category,
                     meta=meta,
                     prior_meta=item.metadata_,
                     source_hash=item.content_hash or item.quick_hash,
@@ -600,7 +630,7 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
                 meta["_extract_error"] = str(exc)
                 extract_failed = True
 
-        # P4-T2: validate the extractor output against its MediaType profile
+        # P4-T2: validate the extractor output against its file_category profile
         # BEFORE it reaches metadata_. This catches a future extractor regression
         # the coercers can't (e.g. a declared-int field handed a non-numeric
         # string) without ever failing the job. Only the INVALID fields are
@@ -610,7 +640,7 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
         # visible — distinct from ``_extract_error`` (an extraction failure);
         # validation never corrupts metadata_ with the rejected value.
         if meta:
-            violations = validate_metadata(item.media_type, meta)
+            violations = validate_metadata(item.file_category, meta)
             if violations:
                 invalid = {v.field for v in violations}
                 meta = {k: val for k, val in meta.items() if k not in invalid}
@@ -634,12 +664,17 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
         prev_metadata = dict(item.metadata_)
         changed = {k: v for k, v in meta.items() if prev_metadata.get(k) != v}
         if changed:
+            # W8-B: attribute the audit row to the item's taxonomy category
+            # (``extract:<file_category>``), the successor to the old
+            # ``extract:<media_type>`` provenance tag. NULL category (unclassified
+            # row) degrades to ``extract:other``.
+            source = f"extract:{item.file_category or 'other'}"
             session.add(
                 ItemVersion(
                     item_id=item.id,
-                    actor=f"extract:{item.media_type.value}",
+                    actor=source,
                     patch=changed,
-                    source=f"extract:{item.media_type.value}",
+                    source=source,
                 )
             )
 
@@ -738,13 +773,13 @@ async def extract_item(item_id: str, scan_run_id: str | None = None) -> None:
     # discipline as the extract wave: by the time this runs the file's hashes are
     # committed, so ``thumb_item`` keys the content-addressed cache correctly.
     # Skipped when thumbnails are off, the extract failed (no source worth
-    # thumbnailing), or the media type is not thumbnailable in slice 1 (video is
-    # slice 2; docs/3D/other get a client placeholder). The GRID tier is
-    # pregenerated here; the preview tier stays lazy (serve-path on first miss).
+    # thumbnailing), or the category is not thumbnailable in slice 1 (video is
+    # slice 2; dev/archive/system/other get a client placeholder). The GRID tier
+    # is pregenerated here; the preview tier stays lazy (serve-path on first miss).
     if settings.thumbs_enabled and not extract_failed:
         from filearr.tasks.thumbs import is_thumbnailable
 
-        if is_thumbnailable(item_media_type, item_rel_path):
+        if is_thumbnailable(item_file_category, item_rel_path):
             # Best-effort enqueue: a thumbnail is a DISPOSABLE derived artifact
             # (invariant 1), so a transient enqueue failure must never fail an
             # extract that already committed + indexed -- the item still gets a

@@ -55,7 +55,8 @@ def _file_facts(path: str):
 async def _make_item(Session, media_type, path: str):
     from datetime import UTC, datetime
 
-    from filearr.models import Item, Library, MediaType
+    from filearr.file_groups import detect_category, detect_group
+    from filearr.models import Item, Library
 
     name, ext, size = _file_facts(path)
     async with Session() as s:
@@ -64,7 +65,8 @@ async def _make_item(Session, media_type, path: str):
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType(media_type),
+            file_category=detect_category(path),
+            file_group=detect_group(path),
             path=path,
             rel_path=name,
             filename=name,

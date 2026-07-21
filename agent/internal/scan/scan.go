@@ -26,20 +26,27 @@ type Progress struct {
 // Options configures one Scan. Root is the absolute filesystem root; StartRel
 // (optional) confines the walk to a subtree while item identity stays relative
 // to Root. When Spec is nil it is built from EnabledPresets/ExcludeGlobs/
-// IncludeGlobs. EnabledTypes gates media types at walk time (empty = all types;
-// sidecars always bypass the gate). ShouldStop, when it returns true between
-// batches, requests a graceful stop (skips move detection AND tombstoning).
+// IncludeGlobs. EnabledCategories/EnabledGroups gate the File Extension
+// Similarity Taxonomy at walk time, mirroring central's library model: a file is
+// included iff BOTH are empty (all files) OR its file_category is in
+// EnabledCategories OR its file_group is in EnabledGroups (sidecars always bypass
+// the gate). Taxonomy classifies each file into (file_category, file_group);
+// when nil the baked-in seed taxonomy is used (W8-E). ShouldStop, when it returns
+// true between batches, requests a graceful stop (skips move detection AND
+// tombstoning).
 type Options struct {
-	Root           string
-	StartRel       string
-	EnabledPresets []string
-	ExcludeGlobs   []string
-	IncludeGlobs   []string
-	Spec           *Spec
-	EnabledTypes   []string
-	Hash           HashPolicy
-	Progress       func(Progress)
-	ShouldStop     func() bool
+	Root              string
+	StartRel          string
+	EnabledPresets    []string
+	ExcludeGlobs      []string
+	IncludeGlobs      []string
+	Spec              *Spec
+	EnabledCategories []string
+	EnabledGroups     []string
+	Taxonomy          Classifier
+	Hash              HashPolicy
+	Progress          func(Progress)
+	ShouldStop        func() bool
 	// Shares (optional, P10-T11) discovers the network-share hint for each
 	// created/modified file. Nil = no discovery (hints omitted). Best-effort: a
 	// nil Hint for an uncovered path is normal, never an error.
@@ -105,9 +112,17 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 		return Result{}, err
 	}
 
-	enabled := map[string]bool{}
-	for _, t := range opts.EnabledTypes {
-		enabled[t] = true
+	classifier := opts.Taxonomy
+	if classifier == nil {
+		classifier = seedClassifier()
+	}
+	enabledCats := map[string]bool{}
+	for _, c := range opts.EnabledCategories {
+		enabledCats[c] = true
+	}
+	enabledGroups := map[string]bool{}
+	for _, g := range opts.EnabledGroups {
+		enabledGroups[g] = true
 	}
 
 	res := Result{Root: root, RootID: rootID}
@@ -146,15 +161,15 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 			return err // hard cancel
 		}
 		sidecar := isSidecar(e.Rel)
-		mediaType := detectMediaType(e.Path)
-		if len(enabled) > 0 && !sidecar && !enabled[string(mediaType)] {
-			return nil // media type excluded for this library
+		category, group := classifier.Classify(e.Path)
+		if !sidecar && !categoryEnabled(enabledCats, enabledGroups, category, group) {
+			return nil // file_category/file_group excluded for this library
 		}
 		seen[e.Rel] = true
 		if err := ensureTx(); err != nil {
 			return err
 		}
-		if err := diffEntry(ctx, tx, root, rootID, existing, e, mediaType, sidecar, policy, &res, &newItems, opts.Shares); err != nil {
+		if err := diffEntry(ctx, tx, root, rootID, existing, e, category, group, sidecar, policy, &res, &newItems, opts.Shares); err != nil {
 			return err
 		}
 		if len(seen)%flushEvery == 0 {
@@ -194,7 +209,7 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 
 	// Sidecar association is idempotent and derives from the full active row set,
 	// so it is safe after a partial (graceful-stop) walk too.
-	sc, err := associateSidecars(ctx, store, rootID)
+	sc, err := associateSidecars(ctx, store, rootID, classifier)
 	if err != nil {
 		return Result{}, err
 	}
@@ -213,7 +228,7 @@ func Scan(ctx context.Context, store *index.Store, opts Options) (Result, error)
 // tombstoning here.
 func diffEntry(
 	ctx context.Context, tx *sql.Tx, libraryRef, rootID string, existing map[string]*index.Item,
-	e WalkEntry, mediaType MediaType, sidecar bool, policy HashPolicy,
+	e WalkEntry, category, group string, sidecar bool, policy HashPolicy,
 	res *Result, newItems *[]*index.Item, sh ShareResolver,
 ) error {
 	now := time.Now().UTC()
@@ -224,18 +239,19 @@ func diffEntry(
 			return err
 		}
 		it := &index.Item{
-			ID:        id,
-			RootID:    rootID,
-			RelPath:   e.Rel,
-			Filename:  path.Base(e.Rel),
-			Extension: fileExtension(path.Base(e.Rel)),
-			Size:      e.Size,
-			MtimeNs:   e.MtimeNs,
-			MediaType: string(mediaType),
-			Status:    index.StatusActive,
-			IsSidecar: sidecar,
-			FirstSeen: now,
-			LastSeen:  now,
+			ID:           id,
+			RootID:       rootID,
+			RelPath:      e.Rel,
+			Filename:     path.Base(e.Rel),
+			Extension:    fileExtension(path.Base(e.Rel)),
+			Size:         e.Size,
+			MtimeNs:      e.MtimeNs,
+			FileCategory: category,
+			FileGroup:    group,
+			Status:       index.StatusActive,
+			IsSidecar:    sidecar,
+			FirstSeen:    now,
+			LastSeen:     now,
 		}
 		if !sidecar {
 			it.QuickHash, it.ContentHash = hashFile(e.Path, e.Size, policy)
@@ -258,7 +274,8 @@ func diffEntry(
 	if item.Size != e.Size || item.MtimeNs != e.MtimeNs {
 		item.Size = e.Size
 		item.MtimeNs = e.MtimeNs
-		item.MediaType = string(mediaType)
+		item.FileCategory = category
+		item.FileGroup = group
 		item.Status = index.StatusActive
 		item.LastSeen = now
 		if !sidecar {

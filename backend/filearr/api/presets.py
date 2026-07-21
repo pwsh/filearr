@@ -36,7 +36,7 @@ async def list_presets() -> PresetsResponse:
             ExtensionGroupOut(
                 name=name,
                 label=g.label,
-                media_type=g.media_type.value,
+                file_category=g.file_category,
                 extensions=list(g.extensions),
             )
             for name, g in EXTENSION_GROUPS.items()

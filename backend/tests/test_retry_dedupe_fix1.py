@@ -109,12 +109,12 @@ async def _mk_lib(maker, name="lib"):
 
 
 async def _mk_item(maker, library_id, rel_path, *, metadata=None, quick_hash=None):
-    from filearr.models import Item, MediaType
+    from filearr.models import Item
 
     async with maker() as s:
         item = Item(
             library_id=library_id,
-            media_type=MediaType.audio,
+            file_category="audio", file_group="audio-lossy",
             status="active",
             path=f"/d/{rel_path}",
             rel_path=rel_path,

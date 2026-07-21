@@ -33,7 +33,7 @@ from sqlalchemy import Numeric, and_, cast, not_, or_, true
 from sqlalchemy.sql.elements import ColumnElement
 
 from filearr.custom_fields import CustomFieldDef
-from filearr.models import Item, MediaType
+from filearr.models import Item
 from filearr.querydsl import (
     CF_PREFIX,
     MAX_DYNAMIC_KEY_LEN,
@@ -179,20 +179,41 @@ def _date_predicate(column, v: DateValue) -> ColumnElement:
 
 
 def _kind_predicate(v: StringValue) -> ColumnElement:
-    try:
-        mt = MediaType(v.value)
-    except ValueError:
+    # W8-B: the ``kind:`` DSL keyword is KEPT (stable, user-facing grammar) but now
+    # maps to the taxonomy ``file_category`` (the successor to the removed
+    # media_type). Values are validated against the seed category vocabulary
+    # (``file_groups.FILE_CATEGORIES``); a runtime-added category still filters (the
+    # WHERE clause just compares strings) but is not offered as a validated value.
+    from filearr.file_groups import FILE_CATEGORIES
+
+    if v.value not in FILE_CATEGORIES:
         raise QueryTranslationError(
-            f"unknown kind {v.value!r}; expected one of "
-            f"{sorted(m.value for m in MediaType)}"
+            f"unknown kind {v.value!r}; expected one of {sorted(FILE_CATEGORIES)}"
         ) from None
-    return Item.media_type == mt
+    return Item.file_category == v.value
+
+
+def _group_predicate(v: StringValue) -> ColumnElement:
+    # W8-D: the ``group:`` DSL keyword maps to the taxonomy ``file_group`` (the finer
+    # child of ``file_category``). Mirrors ``_kind_predicate``: values are validated
+    # against the seed group vocabulary (``file_groups.FILE_GROUPS``); a
+    # runtime-added group still filters (the WHERE just compares strings) but is not
+    # offered as a validated value.
+    from filearr.file_groups import FILE_GROUPS
+
+    if v.value not in FILE_GROUPS:
+        raise QueryTranslationError(
+            f"unknown group {v.value!r}; expected one of {sorted(FILE_GROUPS)}"
+        ) from None
+    return Item.file_group == v.value
 
 
 def _known_filter(f: Filter) -> ColumnElement:
     key, v = f.key, f.value
     if key == "kind":
         return _kind_predicate(v)
+    if key == "group":
+        return _group_predicate(v)
     if key == "ext":
         vals = v.values if isinstance(v, ListValue) else (v.value,)
         return Item.extension.in_(list(vals))

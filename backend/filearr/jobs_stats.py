@@ -25,9 +25,9 @@ from __future__ import annotations
 import os
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select, text
+from sqlalchemy import BigInteger, Float, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from filearr.config import get_settings
@@ -222,9 +222,17 @@ async def running_jobs(session: AsyncSession, *, limit: int = _RUNNING_CAP) -> l
 async def running_scans(session: AsyncSession) -> list[dict]:
     """Scan runs currently ``running``, with their library name + live stats.
 
-    Shape ``[{id, library_id, library_name, rel_path, stats}]``. ``rel_path`` is
-    the scoped-scan subtree (null for a full-library scan); ``stats`` is the
-    live progress blob the scan task batches into ``ScanRun.stats``.
+    Shape ``[{id, library_id, library_name, rel_path, started_at, stats}]``.
+    ``rel_path`` is the scoped-scan subtree (null for a full-library scan);
+    ``stats`` is the live progress blob the scan task batches into
+    ``ScanRun.stats``.
+
+    ``started_at`` is emitted so the dashboard can derive throughput
+    (``stats.seen`` / elapsed) between polls without a second round-trip — the
+    same client-side-rate convention ``resources.io``/``net`` already use. The
+    SSE endpoint computes its own ``rate`` from the identical inputs
+    (``api/scans.py`` ``_snapshot``); both are cumulative averages since the run
+    started, not instantaneous rates.
     """
     rows = (
         await session.execute(
@@ -241,10 +249,62 @@ async def running_scans(session: AsyncSession) -> list[dict]:
             "library_id": str(run.library_id),
             "library_name": name,
             "rel_path": run.rel_path,
+            "started_at": run.started_at.isoformat() if run.started_at else None,
             "stats": dict(run.stats or {}),
         }
         for run, name in rows
     ]
+
+
+# Aggregate-throughput window. Scans are infrequent and `scan_runs` is small, so
+# a 30-day window is cheap even without an index on (status, started_at).
+_THROUGHPUT_WINDOW_DAYS = 30
+
+
+async def scan_throughput(session: AsyncSession) -> dict:
+    """Aggregate walk throughput across recent COMPLETED scans.
+
+    Shape ``{runs, files, bytes, seconds, files_per_min, bytes_per_s, window_days}``.
+
+    Weighted deliberately: ``SUM(seen) / SUM(walk_seconds)`` — NOT
+    ``AVG(files_per_s)``, which would let a 3-file scoped rescan outweigh a
+    500k-file full scan. Only ``finished`` runs count; ``failed``/``cancelled``/
+    ``stopped`` runs have partial or absent timing and would skew the average.
+
+    Rows written before ``walk_seconds`` existed (and ``scope_missing``
+    early-returns) simply lack the key, so ``->>`` yields NULL and the
+    ``> 0`` predicate drops them — no backfill needed. Returns zeros rather than
+    raising if nothing qualifies, matching ``thumbnail_totals``.
+    """
+    walk_s = ScanRun.stats["walk_seconds"].astext.cast(Float)
+    seen = func.coalesce(ScanRun.stats["seen"].astext.cast(BigInteger), 0)
+    size = func.coalesce(ScanRun.stats["bytes_seen"].astext.cast(BigInteger), 0)
+    cutoff = datetime.now(UTC) - timedelta(days=_THROUGHPUT_WINDOW_DAYS)
+    row = (
+        await session.execute(
+            select(
+                func.count(),
+                func.coalesce(func.sum(seen), 0),
+                func.coalesce(func.sum(size), 0),
+                func.coalesce(func.sum(walk_s), 0.0),
+            ).where(
+                ScanRun.status == "finished",
+                ScanRun.started_at >= cutoff,
+                # NULL (key absent) fails this predicate, so untimed rows drop out.
+                walk_s > 0,
+            )
+        )
+    ).one()
+    runs, files, total_bytes, seconds = int(row[0]), int(row[1]), int(row[2]), float(row[3])
+    return {
+        "runs": runs,
+        "files": files,
+        "bytes": total_bytes,
+        "seconds": round(seconds, 2),
+        "files_per_min": round(files * 60.0 / seconds, 1) if seconds > 0 else 0.0,
+        "bytes_per_s": round(total_bytes / seconds) if seconds > 0 else 0,
+        "window_days": _THROUGHPUT_WINDOW_DAYS,
+    }
 
 
 async def jobs_summary(session: AsyncSession) -> dict:
@@ -272,6 +332,8 @@ async def jobs_summary(session: AsyncSession) -> dict:
           "resources": {"cpu": {...}, "io": {...}|None,            # load monitors
                         "net": {...}|None, "db": {...}|None},
           "thumbs": {"generated", "bytes", "failed_jobs", "queue"},# thumbs monitor
+          "scan_throughput": {"runs", "files", "bytes", "seconds", # walk rate
+                              "files_per_min", "bytes_per_s", "window_days"},
           "upcoming": {<queue>: [{label, at, task}, ...], ...},    # scheduled work
         }
 
@@ -290,6 +352,7 @@ async def jobs_summary(session: AsyncSession) -> dict:
     meili = await meili_snapshot(session)
     scans = await running_scans(session)
     thumb_totals = await thumbnail_totals(session)
+    throughput = await scan_throughput(session)
 
     # UI-T14: expose the per-task-class default priorities (so the Jobs page shows
     # each queue's current default in its stepper) and whether the staged pipeline
@@ -361,6 +424,7 @@ async def jobs_summary(session: AsyncSession) -> dict:
         "disk": disk,
         "resources": resources,
         "thumbs": thumbs,
+        "scan_throughput": throughput,
         "upcoming": upcoming,
     }
 

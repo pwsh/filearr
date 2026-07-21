@@ -26,8 +26,9 @@ from alembic import command
 from filearr import db as db_mod
 from filearr.config import get_settings
 from filearr.db import get_session
+from filearr.file_groups import FILE_CATEGORIES
 from filearr.main import create_app
-from filearr.models import MediaType, MetadataProfile
+from filearr.models import MetadataProfile
 from filearr.profiles import METADATA_PROFILES, PROFILE_VERSION, seed_profiles_to_db
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
@@ -77,7 +78,7 @@ PROFILES = "/api/v1/metadata-profiles"
 # --- P4-T1 seed -------------------------------------------------------------
 
 
-async def test_seed_is_idempotent_and_covers_every_media_type(maker):
+async def test_seed_is_idempotent_and_covers_every_file_category(maker):
     await seed_profiles_to_db(maker)
     await seed_profiles_to_db(maker)  # second run must not duplicate
 
@@ -86,9 +87,9 @@ async def test_seed_is_idempotent_and_covers_every_media_type(maker):
         rows = (await s.execute(select(MetadataProfile))).scalars().all()
 
     # one row per MediaType member, no dups.
-    assert count == len(MediaType) == len(METADATA_PROFILES)
-    by_type = {r.media_type: r for r in rows}
-    assert set(by_type) == {mt.value for mt in MediaType}
+    assert count == len(FILE_CATEGORIES) == len(METADATA_PROFILES)
+    by_type = {r.file_category: r for r in rows}
+    assert set(by_type) == set(FILE_CATEGORIES)
     for r in rows:
         assert r.version == PROFILE_VERSION
     # audio profile schema mirrors the FieldSpec projection.
@@ -109,7 +110,7 @@ async def test_seed_respects_newer_stored_version(maker):
         await s.execute(
             text(
                 "UPDATE metadata_profiles SET version = 999, schema = '{\"x\": 1}'::jsonb "
-                "WHERE media_type = 'audio'"
+                "WHERE file_category = 'audio'"
             )
         )
         await s.commit()
@@ -117,7 +118,7 @@ async def test_seed_respects_newer_stored_version(maker):
     async with maker() as s:
         row = (
             await s.execute(
-                select(MetadataProfile).where(MetadataProfile.media_type == "audio")
+                select(MetadataProfile).where(MetadataProfile.file_category == "audio")
             )
         ).scalar_one()
     assert row.version == 999
@@ -132,10 +133,10 @@ async def test_list_profiles_shape(client, maker):
     r = await client.get(PROFILES)
     assert r.status_code == 200, r.text
     body = r.json()
-    assert len(body) == len(MediaType)
-    types = {p["media_type"] for p in body}
-    assert types == {mt.value for mt in MediaType}
-    video = next(p for p in body if p["media_type"] == "video")
+    assert len(body) == len(FILE_CATEGORIES)
+    types = {p["file_category"] for p in body}
+    assert types == set(FILE_CATEGORIES)
+    video = next(p for p in body if p["file_category"] == "video")
     assert video["version"] == PROFILE_VERSION
     assert video["fields"]["video_codec"]["type"] == "string"
     assert video["fields"]["video_codec"]["facetable"] is True
@@ -145,7 +146,7 @@ async def test_get_single_profile_and_404(client, maker):
     await seed_profiles_to_db(maker)
     r = await client.get(f"{PROFILES}/image")
     assert r.status_code == 200, r.text
-    assert r.json()["media_type"] == "image"
+    assert r.json()["file_category"] == "image"
     assert "width" in r.json()["fields"]
     assert (await client.get(f"{PROFILES}/nonsense")).status_code == 404
 
@@ -168,7 +169,7 @@ async def test_check_rejects_non_object_user_metadata(maker):
         async with maker() as s:
             await s.execute(
                 text(
-                    "INSERT INTO items (library_id, media_type, path, rel_path, "
+                    "INSERT INTO items (library_id, file_category, path, rel_path, "
                     "filename, size, mtime, user_metadata) VALUES "
                     "(:lib, 'other', '/d/a', 'a', 'a', 1, now(), '[]'::jsonb)"
                 ),
@@ -204,7 +205,7 @@ async def _make_audio_item(maker, path: str) -> str:
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.audio,
+            file_category="audio", file_group="audio-lossy",
             path=path,
             rel_path="a.mp3",
             filename="a.mp3",
@@ -234,7 +235,7 @@ async def test_invalid_field_dropped_valid_kept_job_green(extract_db, tmp_path, 
     def _bad_extractor(_path):
         return {"year": {"nope": 1}, "artist": "Real Artist", "weird_key": "keep me"}
 
-    monkeypatch.setitem(extract_mod.EXTRACTORS, MediaType.audio, _bad_extractor)
+    monkeypatch.setitem(extract_mod.EXTRACTOR_BY_KIND, "audio", _bad_extractor)
 
     await extract_item(item_id)  # must NOT raise
 
@@ -264,7 +265,7 @@ async def test_valid_extractor_output_records_no_validation_errors(
     def _good_extractor(_path):
         return {"artist": "A", "year": 1999, "some_future_key": "x"}
 
-    monkeypatch.setitem(extract_mod.EXTRACTORS, MediaType.audio, _good_extractor)
+    monkeypatch.setitem(extract_mod.EXTRACTOR_BY_KIND, "audio", _good_extractor)
     await extract_item(item_id)
 
     async with extract_db() as s:

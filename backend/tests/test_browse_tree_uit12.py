@@ -78,14 +78,16 @@ async def _mk_lib(maker, name="Lib", **kw):
         return str(lib.id)
 
 
-async def _mk_item(maker, library_id, rel_path, *, media_type="video", status="active",
+async def _mk_item(maker, library_id, rel_path, *, status="active",
                    sidecar_of=None, title=None, year=None):
-    from filearr.models import Item, MediaType
+    from filearr.file_groups import detect_category, detect_group
+    from filearr.models import Item
 
     async with maker() as s:
         item = Item(
             library_id=library_id,
-            media_type=MediaType(media_type),
+            file_category=detect_category(rel_path),
+            file_group=detect_group(rel_path),
             status=status,
             path=f"/d/{rel_path}",
             rel_path=rel_path,
@@ -145,15 +147,14 @@ async def tree_lib(wired):
     maker = wired["maker"]
     lib = await _mk_lib(maker, "Media")
     # top-level file
-    await _mk_item(maker, lib, "readme.txt", media_type="document")
+    await _mk_item(maker, lib, "readme.txt")
     # Movies subtree with a sidecar and a trashed sibling
     vid = await _mk_item(maker, lib, "Movies/Arcane (2021)/Arcane.mp4", title="Arcane", year=2021)
-    await _mk_item(maker, lib, "Movies/Arcane (2021)/Arcane.nfo",
-                   media_type="other", sidecar_of=vid)
+    await _mk_item(maker, lib, "Movies/Arcane (2021)/Arcane.nfo", sidecar_of=vid)
     await _mk_item(maker, lib, "Movies/Dune/Dune.mp4", title="Dune")
     await _mk_item(maker, lib, "Movies/old.mp4", status="trashed")
     # a second top-level folder
-    await _mk_item(maker, lib, "Music/song.mp3", media_type="audio")
+    await _mk_item(maker, lib, "Music/song.mp3")
     # LIKE-metacharacter folders (escaping)
     await _mk_item(maker, lib, "Weird%Folder/a.mp4")
     await _mk_item(maker, lib, "WeirdXXXFolder/other.mp4")

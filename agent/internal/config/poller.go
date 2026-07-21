@@ -79,6 +79,16 @@ type PollerConfig struct {
 	// fields take the outbox defaults (1s→5m, ×2).
 	Backoff outbox.BackoffConfig
 
+	// AfterFetch, when non-nil, is invoked after every SUCCESSFUL poll (a 200 or a
+	// 304 — both confirm central contact) with the policy document now in effect.
+	// The daemon uses it to version-gate the taxonomy-cache refresh off the
+	// policy's taxonomy_version. It runs OUTSIDE the apply-identity gate on purpose:
+	// a taxonomy edit bumps only the ETag (not scope/version), so it arrives as a
+	// 200 with OutcomeUnchanged and the apply seam does not fire — but AfterFetch
+	// still sees the fresh doc. It must be quick/non-blocking; its own errors are
+	// its concern (the poll loop ignores them).
+	AfterFetch func(context.Context, PolicyDoc)
+
 	// Test seams.
 	Now    func() time.Time
 	Sleep  func(context.Context, time.Duration) bool // false => ctx cancelled
@@ -98,6 +108,8 @@ type Poller struct {
 
 	defaultInterval time.Duration
 	minInterval     time.Duration
+
+	afterFetch func(context.Context, PolicyDoc)
 
 	now    func() time.Time
 	sleep  func(context.Context, time.Duration) bool
@@ -132,6 +144,7 @@ func NewPoller(cfg PollerConfig) *Poller {
 		backoff:         outbox.NewBackoff(cfg.Backoff),
 		defaultInterval: cfg.DefaultInterval,
 		minInterval:     cfg.MinInterval,
+		afterFetch:      cfg.AfterFetch,
 		now:             cfg.Now,
 		sleep:           cfg.Sleep,
 		jitter:          cfg.Jitter,
@@ -253,6 +266,7 @@ func (p *Poller) pollCycle(ctx context.Context) (PolicyDoc, PollOutcome, error) 
 		if serr := p.cache.Save(cur); serr != nil {
 			p.log.Warn("persist 304 freshness failed", "err", serr)
 		}
+		p.fireAfterFetch(ctx, cur)
 		return cur, OutcomeNotModified, nil
 	}
 	if err != nil {
@@ -294,7 +308,15 @@ func (p *Poller) pollCycle(ctx context.Context) (PolicyDoc, PollOutcome, error) 
 	if err := p.cache.Save(doc); err != nil {
 		return doc, outcome, fmt.Errorf("persist policy: %w", err)
 	}
+	p.fireAfterFetch(ctx, doc)
 	return doc, outcome, nil
+}
+
+// fireAfterFetch invokes the optional post-fetch hook with the doc in effect.
+func (p *Poller) fireAfterFetch(ctx context.Context, doc PolicyDoc) {
+	if p.afterFetch != nil {
+		p.afterFetch(ctx, doc)
+	}
 }
 
 // nextInterval derives the (jittered) sleep before the next poll from the doc's

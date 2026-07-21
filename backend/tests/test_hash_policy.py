@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from alembic import command
 from filearr.hashpolicy import resolve_hash_policy
-from filearr.models import HashPolicy, Item, Library, MediaType, ScanRun  # noqa: F401
+from filearr.models import HashPolicy, Item, Library, ScanRun  # noqa: F401
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -255,7 +255,7 @@ BODY = b"ZZZZ" * 40_000
 
 
 async def _mk_library(session, root, name, **kw):
-    lib = Library(name=name, root_path=str(root), enabled_types=[], **kw)
+    lib = Library(name=name, root_path=str(root), enabled_categories=[], **kw)
     session.add(lib)
     await session.commit()
     return lib
@@ -460,13 +460,13 @@ async def _seed_item(Session, tmp_path, name, hash_policy):
     f.write_bytes(BODY)
     async with Session() as s:
         lib = Library(
-            name=f"lib-{name}", root_path=str(root), enabled_types=[],
+            name=f"lib-{name}", root_path=str(root), enabled_categories=[],
             hash_policy=hash_policy,
         )
         s.add(lib)
         await s.flush()
         item = Item(
-            library_id=lib.id, media_type=MediaType.video, path=str(f),
+            library_id=lib.id, file_category="video", file_group="video", path=str(f),
             rel_path="clip.mkv", filename="clip.mkv", extension="mkv",
             size=f.stat().st_size, mtime=datetime.now(),
         )
@@ -504,13 +504,13 @@ async def test_extract_quick_only_small_file_gets_content_hash(maker, tmp_path):
     f.write_bytes(b"AB" * 50_000)  # 100 KiB, in the 64-128 KiB band
     async with maker() as s:
         lib = Library(
-            name="lib-esmall", root_path=str(root), enabled_types=[],
+            name="lib-esmall", root_path=str(root), enabled_categories=[],
             hash_policy="quick_only",
         )
         s.add(lib)
         await s.flush()
         item = Item(
-            library_id=lib.id, media_type=MediaType.other, path=str(f),
+            library_id=lib.id, file_category="other", file_group="other", path=str(f),
             rel_path="small.bin", filename="small.bin", extension="bin",
             size=f.stat().st_size, mtime=datetime.now(),
         )
@@ -537,13 +537,13 @@ async def test_extract_full_policy_respects_ceiling(maker, tmp_path):
     f.write_bytes(BODY)  # 160 KiB
     async with maker() as s:
         lib = Library(
-            name="lib-eceil", root_path=str(root), enabled_types=[],
+            name="lib-eceil", root_path=str(root), enabled_categories=[],
             hash_policy="full", hash_full_max_bytes=1_000,  # 1 KB ceiling < file
         )
         s.add(lib)
         await s.flush()
         item = Item(
-            library_id=lib.id, media_type=MediaType.video, path=str(f),
+            library_id=lib.id, file_category="video", file_group="video", path=str(f),
             rel_path="big.mkv", filename="big.mkv", extension="mkv",
             size=f.stat().st_size, mtime=datetime.now(),
         )

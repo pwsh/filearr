@@ -33,7 +33,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from filearr.api.custom_reports import _compile, _load_custom_defs
 from filearr.api.reports import _json_page
 from filearr.db import get_session
-from filearr.models import CustomField, MediaType
+from filearr.file_groups import FILE_CATEGORIES, FILE_GROUPS
+from filearr.models import CustomField
 from filearr.profiles import METADATA_PROFILES
 from filearr.reports import ReportParams
 from filearr.schemas_reports import QueryPreviewIn
@@ -48,7 +49,8 @@ PREVIEW_COLUMNS: list[str] = [
     "filename",
     "library",
     "rel_path",
-    "media_type",
+    "file_category",
+    "file_group",
     "size",
     "mtime",
 ]
@@ -120,16 +122,22 @@ async def preview_query(
 
 @router.get("/keys", dependencies=[Depends(require_scope("read"))])
 async def get_query_keys(session: AsyncSession = Depends(get_session)) -> dict:
-    """Value-picker vocabulary for the builder's ``meta.``/``cf.``/``kind`` fields.
+    """Value-picker vocabulary for the builder's ``meta.``/``cf.``/``kind``/``group``
+    fields.
 
     ``meta_keys`` are aggregated from the code-shipped metadata profiles (the
     cheap, curated source — see module docstring); ``custom_fields`` from the DB;
-    ``kinds`` from the ``MediaType`` enum. ``source`` records the provenance so a
-    future switch to a live ``jsonb_object_keys`` sample is an explicit change."""
-    # Aggregate profile FieldSpecs by name, collecting which media types emit each
-    # and a representative data_type/label (first wins; profiles are consistent).
+    ``kinds`` are the taxonomy ``file_category`` keys (W8-B: the ``kind:`` DSL
+    filter maps to ``file_category``, the successor to the removed media_type);
+    ``groups`` are the finer ``file_group`` keys (W8-D: the ``group:`` DSL filter
+    maps to ``file_group``).
+    ``source`` records the provenance so a future switch to a live
+    ``jsonb_object_keys`` sample is an explicit change."""
+    # Aggregate profile FieldSpecs by name, collecting which file categories emit
+    # each and a representative data_type/label (first wins; profiles are
+    # consistent).
     by_name: dict[str, dict] = {}
-    for media_type, specs in METADATA_PROFILES.items():
+    for file_category, specs in METADATA_PROFILES.items():
         for spec in specs:
             entry = by_name.get(spec.name)
             if entry is None:
@@ -137,10 +145,10 @@ async def get_query_keys(session: AsyncSession = Depends(get_session)) -> dict:
                     "key": spec.name,
                     "label": spec.label,
                     "data_type": spec.data_type,
-                    "media_types": [],
+                    "file_categories": [],
                 }
                 by_name[spec.name] = entry
-            entry["media_types"].append(media_type.value)
+            entry["file_categories"].append(file_category)
     meta_keys = sorted(by_name.values(), key=lambda e: e["key"])
 
     rows = (await session.execute(select(CustomField))).scalars().all()
@@ -157,6 +165,7 @@ async def get_query_keys(session: AsyncSession = Depends(get_session)) -> dict:
     return {
         "meta_keys": meta_keys,
         "custom_fields": custom_fields,
-        "kinds": [m.value for m in MediaType],
+        "kinds": sorted(FILE_CATEGORIES),
+        "groups": sorted(FILE_GROUPS),
         "source": "metadata_profiles+custom_fields",
     }

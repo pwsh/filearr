@@ -98,7 +98,7 @@ async def test_e2e_scan_extract_all_types_and_sidecars(engine, media_tree, monke
         lib = Library(
             name="everything",
             root_path=str(media_tree.root),
-            enabled_types=ENABLED_TYPES,
+            enabled_categories=ENABLED_TYPES,
             exclude_globs=["*.partial"],
         )
         session.add(lib)
@@ -120,7 +120,7 @@ async def test_e2e_scan_extract_all_types_and_sidecars(engine, media_tree, monke
 
         by_type: dict[str, list[Item]] = {}
         for it in items:
-            by_type.setdefault(it.media_type.value, []).append(it)
+            by_type.setdefault(it.file_category, []).append(it)
 
         primaries = [i for i in items if i.sidecar_of is None and not i.is_sidecar]
         sidecar_rows = [i for i in items if i.is_sidecar]
@@ -144,7 +144,7 @@ async def test_e2e_scan_extract_all_types_and_sidecars(engine, media_tree, monke
 
         # --- stats.by_type populated for EVERY enabled type ---
         stats_by_type = {
-            t: len([i for i in primaries if i.media_type.value == t])
+            t: len([i for i in primaries if i.file_category == t])
             for t in ENABLED_TYPES
         }
         for t in ENABLED_TYPES:
@@ -166,7 +166,7 @@ async def test_e2e_scan_extract_all_types_and_sidecars(engine, media_tree, monke
             )
 
         # --- the NFO folded its title/plot into the video parent's metadata ---
-        video = next(i for i in primaries if i.media_type.value == "video")
+        video = next(i for i in primaries if i.file_category == "video")
         # parent metadata should carry NFO-derived fields (title/plot)
         nfo_derived = (video.metadata_ or {})
         assert any(

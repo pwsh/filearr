@@ -41,6 +41,8 @@ EXPECTED_VECTORS: list[str] = [
     "-draft",
     "kind:video",
     "-kind:sample",
+    "group:raw-photo",
+    "-group:archive",
     "ext:pdf",
     "ext:mp4;mkv;avi",
     "-ext:tmp",

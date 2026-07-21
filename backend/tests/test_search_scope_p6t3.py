@@ -24,7 +24,6 @@ from filearr import rbac
 from filearr.models import (
     Item,
     Library,
-    MediaType,
     PathGrant,
     Principal,
     User,
@@ -73,7 +72,7 @@ async def _seed(m):
         def _item(lib, rel):
             return Item(
                 library_id=lib.id,
-                media_type=MediaType.video,
+                file_category="video", file_group="video",
                 path=f"/data/{lib.name}/{rel}",
                 rel_path=rel,
                 filename=rel.rsplit("/", 1)[-1],

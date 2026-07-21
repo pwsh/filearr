@@ -86,4 +86,5 @@ nav:
   - Reference:
       - Configuration: reference/configuration.md
       - API: reference/api.md
+      - File-extension groups: reference/file-extension-groups.md
       - Development: reference/development.md

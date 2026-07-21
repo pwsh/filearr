@@ -22,9 +22,21 @@ mounted read-only; Filearr never modifies your files.
 
 For every file the walk records: the absolute path (as currently mounted), the
 **path relative to the library root** (the stable identity), the filename and
-extension, the **size**, and the **modification time**. The media type is
-resolved from the extension (video / audio / audiobook / sample / image / model3d
-/ document / spreadsheet / other).
+extension, the **size**, and the **modification time**. Classification comes from
+the extension via the editable taxonomy: a **file category** (the parent — video,
+audio, image, document, …) and a finer **file group** (RAW vs. raster photo,
+archive, source code, …) — see the [file-extension groups
+reference](reference/file-extension-groups.md).
+
+**Not every file on disk is ingested.** A scan skips files four ways — the
+library's category/group selection, the exclusion presets/globs, pruned
+directories, and unreadable directories. The first two are counted and shown on
+the Libraries page; **pruned and unreadable directories are skipped without being
+read at all**, so the files inside them are counted nowhere and the reported
+totals are a lower bound. This is why a library can legitimately show far fewer
+files than the folder's properties. See [A library indexes fewer files than the
+OS reports](operations.md#library-file-count-mismatch) for how to attribute the
+difference and how to make the counts reconcile exactly.
 
 ### Hashing (xxh3)
 

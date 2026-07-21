@@ -233,8 +233,16 @@ async def test_effective_policy_serves_local_keys_verbatim(client):
         "offline_grace_seconds": 3600,
     }
     await c.put("/api/v1/agent-policies/global", json={"policy": payload})
+    async with maker() as s:
+        tv = int(
+            (
+                await s.execute(text("SELECT version FROM taxonomy_state WHERE id = 1"))
+            ).scalar_one()
+        )
     r = await c.get(
         f"/api/v1/agents/{agent_id}/policy", headers={"Authorization": f"Bearer {fp}"}
     )
     assert r.status_code == 200
-    assert r.json()["policy"] == payload  # served verbatim through resolution
+    # served verbatim through resolution, plus the W8-E computed taxonomy_version
+    # (central always injects it; read live since the migrated DB is session-shared).
+    assert r.json()["policy"] == {**payload, "taxonomy_version": tv}

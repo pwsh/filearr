@@ -31,8 +31,6 @@ from dataclasses import dataclass
 
 from pathspec import GitIgnoreSpec
 
-from filearr.models import MediaType
-
 # --- CACHEDIR.TAG (brief §1.7 / P2-T4) -------------------------------------
 # bford.info spec (public domain): a directory containing a file literally named
 # ``CACHEDIR.TAG`` whose first 43 bytes are exactly this signature is a
@@ -63,17 +61,19 @@ class PresetBundle:
 
 @dataclass(frozen=True)
 class ExtensionGroup:
-    """A named group of file extensions that refines a single ``MediaType``.
+    """A named group of file extensions that refines a single taxonomy
+    ``file_category`` (W8-B re-keyed this off the removed ``MediaType``).
 
-    Ruling R5: multiple groups may target the same ``MediaType`` and combine with
-    **union** semantics; enabling ≥1 group for a type switches that type from
-    "all extensions in the bucket" to "union of the enabled groups' extensions".
-    Extensions are stored bare (no leading dot), lower-case, matching
-    ``media_types.detect`` / ``Item.extension`` normalisation.
+    Ruling R5: multiple groups may target the same category and combine with
+    **union** semantics. NOTE (W8-B): these P2-T3 extension-group presets are now
+    SUPERSEDED for scan gating by the DB-backed taxonomy ``enabled_groups`` and are
+    no longer consulted by the scan walk; they remain a validated API/preset
+    surface. Extensions are stored bare (no leading dot), lower-case, matching
+    ``Item.extension`` normalisation.
     """
 
     label: str
-    media_type: MediaType
+    file_category: str
     extensions: tuple[str, ...]
 
 
@@ -197,39 +197,39 @@ PRESET_BUNDLES: dict[str, PresetBundle] = {
 EXTENSION_GROUPS: dict[str, ExtensionGroup] = {
     "raw_photos": ExtensionGroup(
         label="RAW photos",
-        media_type=MediaType.image,
+        file_category="image",
         extensions=("cr2", "cr3", "nef", "arw", "dng", "raf"),
     ),
     "editable_images": ExtensionGroup(
         label="Editable images (Photoshop/TIFF)",
-        media_type=MediaType.image,
+        file_category="image",
         # Layered/authoring image formats (OPS-T4): Adobe Photoshop documents
         # and TIFF masters. Pillow reads a flattened composite of a PSD.
         extensions=("psd", "tif", "tiff"),
     ),
     "jpeg_family": ExtensionGroup(
         label="JPEG family",
-        media_type=MediaType.image,
+        file_category="image",
         extensions=("jpg", "jpeg"),
     ),
     "office_docs": ExtensionGroup(
         label="Office documents",
-        media_type=MediaType.document,
+        file_category="document",
         extensions=("doc", "docx", "odt", "rtf"),
     ),
     "ebooks": ExtensionGroup(
         label="E-books",
-        media_type=MediaType.document,
+        file_category="document",
         extensions=("epub", "mobi", "azw3", "cbz", "cbr"),
     ),
     "lossless_audio": ExtensionGroup(
         label="Lossless audio",
-        media_type=MediaType.audio,
+        file_category="audio",
         extensions=("flac", "alac", "wav", "ape", "wv"),
     ),
     "lossy_audio": ExtensionGroup(
         label="Lossy audio",
-        media_type=MediaType.audio,
+        file_category="audio",
         extensions=("mp3", "ogg", "opus", "m4a", "wma"),
     ),
 }
@@ -362,37 +362,29 @@ def build_library_spec(library) -> GitIgnoreSpec:  # noqa: ANN001
 
 
 def resolve_enabled_extensions(
-    media_type: MediaType,
-    enabled_types: list[str],
+    file_category: str,
+    enabled_categories: list[str],
     enabled_extension_groups: list[str],
 ) -> set[str] | None:
-    """P2-T3: resolve the effective extension allow-list for a MediaType.
+    """P2-T3: resolve the effective extension allow-list for a ``file_category``.
 
-    Returns ``None`` when the type imposes no extension-group refinement (all
-    extensions in the bucket allowed -- today's behaviour), else the **union** of
-    every enabled group that targets ``media_type`` (ruling R5: multiple groups
-    per type combine with union semantics; enabling >=1 group for a type switches
-    that type from "all extensions in the bucket" to "union of the enabled
-    groups' extensions").
+    NOTE (W8-B): this helper is SUPERSEDED for scan gating by the taxonomy
+    ``enabled_groups`` mechanism (``filearr.taxonomy`` + ``scan.py``) and is no
+    longer called by the scan walk. It is retained as a pure helper for the
+    extension-group preset surface.
 
-    ``enabled_types`` is honoured defensively: when it is non-empty and
-    ``media_type`` is not in it, the type is gated off entirely by the scan's
-    ``enabled_types`` filter, so no refinement applies and ``None`` is returned
-    (there is nothing to narrow). An empty ``enabled_types`` means "all types",
-    so refinement still applies to every group's target type.
-
-    Extensions are returned bare (no leading dot), lower-case, matching
-    ``media_types.detect`` / ``Item.extension`` normalisation. Unknown group
-    names are ignored here (validation is the API's job via
-    :func:`validate_extension_group_names`); this keeps resolution total for the
-    walk.
-    """
-    if enabled_types and media_type.value not in enabled_types:
+    Returns ``None`` when the category imposes no extension-group refinement (all
+    extensions allowed), else the **union** of every enabled group that targets
+    ``file_category`` (ruling R5 union semantics). When ``enabled_categories`` is
+    non-empty and ``file_category`` is not in it, ``None`` is returned (nothing to
+    narrow). Extensions are returned bare (no dot), lower-case. Unknown group names
+    are ignored (validation is :func:`validate_extension_group_names`)."""
+    if enabled_categories and file_category not in enabled_categories:
         return None
     allowed: set[str] = set()
     for name in enabled_extension_groups:
         group = EXTENSION_GROUPS.get(name)
-        if group is not None and group.media_type == media_type:
+        if group is not None and group.file_category == file_category:
             allowed.update(group.extensions)
     return allowed or None
 

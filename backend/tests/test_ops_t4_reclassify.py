@@ -26,7 +26,7 @@ from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
 from filearr.media_types import detect
-from filearr.models import Item, Library, MediaType
+from filearr.models import Item, Library
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -40,23 +40,26 @@ def _psycopg3(uri: str) -> str:
 # --------------------------------------------------------------------------- #
 def test_new_image_extensions_map_to_image():
     for name in ("photo.tif", "master.tiff", "layered.psd", "SHOT.PSD"):
-        assert detect(name) is MediaType.image
+        assert detect(name) == "image"
 
 
 def test_new_video_extensions_map_to_video():
     for name in ("clip.3gp", "clip.3g2", "handycam.mts", "disc.m2ts"):
-        assert detect(name) is MediaType.video
+        assert detect(name) == "video"
 
 
 def test_deliberately_unmapped_stay_other():
-    # OPS-T4 policy: junk / OS artifacts remain 'other' (visible, presets-excludable).
-    for name in ("game.sc2save", "pack.themepack", "tool.exe", "lib.dll",
-                 "x.tsk", "y.url", "z.download"):
-        assert detect(name) is MediaType.other
+    # W8-B: genuinely unrecognised extensions remain 'other' (visible,
+    # presets-excludable). Note exe/dll now classify as file_category 'system'
+    # (the taxonomy rescues them from the old catch-all).
+    for name in ("game.sc2save", "pack.themepack", "x.tsk", "y.url", "z.download"):
+        assert detect(name) == "other"
+    for name in ("tool.exe", "lib.dll"):
+        assert detect(name) == "system"
 
 
 def test_extensionless_is_other():
-    assert detect("README") is MediaType.other
+    assert detect("README") == "other"
 
 
 # --------------------------------------------------------------------------- #
@@ -97,12 +100,13 @@ async def _mk_lib(maker, name="Lib"):
 
 
 async def _mk_item(
-    maker, library_id, rel_path, *, media_type=MediaType.other, status="active",
-    extension="bin", size=100, sidecar_of=None,
+    maker, library_id, rel_path, *, file_category="other", file_group="other",
+    status="active", extension="bin", size=100, sidecar_of=None,
 ):
     async with maker() as s:
         item = Item(
-            library_id=library_id, media_type=media_type, status=status,
+            library_id=library_id, file_category=file_category, file_group=file_group,
+            status=status,
             path=f"/data/l/{rel_path}", rel_path=rel_path,
             filename=rel_path.rsplit("/", 1)[-1], extension=extension, size=size,
             mtime=datetime.now(UTC), metadata_={}, user_metadata={},
@@ -123,7 +127,7 @@ async def test_unmapped_excludes_sidecars_and_trashed(api):
     await _mk_item(maker, lib, "game.sc2save", extension="sc2save", size=10)
     # A primary media item to be the sidecar parent.
     parent = await _mk_item(
-        maker, lib, "movie.mkv", media_type=MediaType.video, extension="mkv"
+        maker, lib, "movie.mkv", file_category="video", file_group="video", extension="mkv"
     )
     # Linked sidecars (media_type=other) — must NOT appear despite being 'other'.
     await _mk_item(maker, lib, "movie.nfo", extension="nfo", size=5, sidecar_of=parent)
@@ -154,31 +158,33 @@ async def test_reclassify_updates_media_type_and_resyncs(api, monkeypatch):
     monkeypatch.setattr(worker, "defer_index_sync", _fake_defer)
 
     lib = await _mk_lib(maker)
-    # Stale rows recorded as 'other' at last scan, now mapped by the new map.
-    tif = await _mk_item(maker, lib, "a.tif", extension="tif", media_type=MediaType.other)
-    psd = await _mk_item(maker, lib, "b.psd", extension="psd", media_type=MediaType.other)
-    tgp = await _mk_item(maker, lib, "c.3gp", extension="3gp", media_type=MediaType.other)
+    # Stale rows recorded as 'other' at last scan, now mapped by the taxonomy.
+    tif = await _mk_item(maker, lib, "a.tif", extension="tif")
+    psd = await _mk_item(maker, lib, "b.psd", extension="psd")
+    tgp = await _mk_item(maker, lib, "c.3gp", extension="3gp")
     # A genuinely unmappable row — must stay 'other', untouched.
     keep = await _mk_item(maker, lib, "d.sc2save", extension="sc2save")
     # An already-correct row — must NOT be counted/resynced.
-    ok = await _mk_item(maker, lib, "e.mkv", extension="mkv", media_type=MediaType.video)
+    ok = await _mk_item(
+        maker, lib, "e.mkv", extension="mkv", file_category="video", file_group="video"
+    )
 
     r = await client.post("/api/v1/system/reclassify-extensions")
     assert r.status_code == 200
     body = r.json()
     assert body["changed"] == 3
-    assert body["by_type"] == {"image": 2, "video": 1}
+    assert body["by_category"] == {"image": 2, "video": 1}
 
     async with maker() as s:
         rows = {
-            str(i.id): i.media_type
+            str(i.id): i.file_category
             for i in (await s.execute(select(Item))).scalars().all()
         }
-    assert rows[tif] is MediaType.image
-    assert rows[psd] is MediaType.image
-    assert rows[tgp] is MediaType.video
-    assert rows[keep] is MediaType.other
-    assert rows[ok] is MediaType.video
+    assert rows[tif] == "image"
+    assert rows[psd] == "image"
+    assert rows[tgp] == "video"
+    assert rows[keep] == "other"
+    assert rows[ok] == "video"
 
     # Exactly the 3 changed ids were deferred for index re-sync (bounded batches).
     synced = {i for batch in deferred for i in batch}
@@ -195,20 +201,20 @@ async def test_reclassify_demotes_unmapped_to_other(api, monkeypatch):
     # A row misclassified as image but whose extension is no longer mapped, and an
     # extensionless row mislabeled video — both must be demoted to 'other'.
     bad1 = await _mk_item(maker, lib, "x.junkext", extension="junkext",
-                          media_type=MediaType.image)
+                          file_category="image", file_group="raster-photo")
     bad2 = await _mk_item(maker, lib, "NOEXT", extension=None,
-                          media_type=MediaType.video)
+                          file_category="video", file_group="video")
     r = await client.post("/api/v1/system/reclassify-extensions")
     assert r.status_code == 200
-    assert r.json()["by_type"].get("other") == 2
+    assert r.json()["by_category"].get("other") == 2
 
     async with maker() as s:
         rows = {
-            str(i.id): i.media_type
+            str(i.id): i.file_category
             for i in (await s.execute(select(Item))).scalars().all()
         }
-    assert rows[bad1] is MediaType.other
-    assert rows[bad2] is MediaType.other
+    assert rows[bad1] == "other"
+    assert rows[bad2] == "other"
 
 
 async def _noop():

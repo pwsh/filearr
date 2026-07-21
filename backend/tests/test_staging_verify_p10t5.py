@@ -44,7 +44,6 @@ from filearr.models import (
     AgentCommand,
     Item,
     Library,
-    MediaType,
     SecurityEvent,
     StagingTransfer,
 )
@@ -111,7 +110,7 @@ async def _seed(
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             path="/agentroot/x.mkv",
             rel_path="x.mkv",
             filename="x.mkv",

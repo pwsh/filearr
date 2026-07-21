@@ -80,7 +80,7 @@ PDFium binding is bundled in a Python wheel).
 |---|---|---|---|
 | 8000 | App (HTTP, in-container) | internal | Published as **8484** on the host in the reference deploys. |
 | 8484 | App (HTTP) | LAN | Web UI + API + `/api/docs`. |
-| 443 / 8443 | Caddy TLS reverse proxy | LAN / public | Optional TLS front (self-signed LAN CA, or a Let's Encrypt wildcard). |
+| 443 / 8443 | Caddy TLS reverse proxy | LAN / public | Optional TLS front (self-signed LAN CA, or a Let's Encrypt wildcard). **TCP only** — HTTP/3 is disabled, so no UDP rule is needed. |
 | 5432 | PostgreSQL | internal only | Not published by default; the stack talks over its private network. |
 | 7700 | Meilisearch | internal only | Not published by default. |
 | 9000 | step-ca (agents) | LAN / agents | Only when the optional agent CA is enabled. |
@@ -88,6 +88,11 @@ PDFium binding is bundled in a Python wheel).
 
 Only the app (and optionally the TLS front and the agent CA) needs to be
 reachable. Postgres and Meilisearch stay on the internal network.
+
+All published ports are **TCP**. Filearr pins Caddy to `h1 h2` (HTTP/3 off), so
+you never need a UDP/443 firewall rule — see
+[TLS operations](https://github.com/pwsh/filearr/blob/main/docs/ops/tls.md) for
+why enabling HTTP/3 here is not a safe drop-in change.
 
 ## Read-only media mount posture
 

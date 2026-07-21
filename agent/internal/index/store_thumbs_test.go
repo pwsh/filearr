@@ -42,24 +42,24 @@ func TestThumbCandidates(t *testing.T) {
 	rid := rootID(t, st, "/media")
 
 	img := insertThumbItem(t, st, rid, &Item{
-		RelPath: "Photos/beach.jpg", MediaType: "image", ContentHash: "ch1", QuickHash: "q1",
+		RelPath: "Photos/beach.jpg", FileCategory: "image", ContentHash: "ch1", QuickHash: "q1",
 	})
 	// An artwork sidecar child of the image (links via sidecar_of).
 	insertThumbItem(t, st, rid, &Item{
-		RelPath: "Photos/beach-thumb.jpg", MediaType: "image", QuickHash: "q2",
+		RelPath: "Photos/beach-thumb.jpg", FileCategory: "image", QuickHash: "q2",
 		IsSidecar: true, SidecarOf: img.ID,
 	})
 	// A hashed video (thumbnailable).
 	insertThumbItem(t, st, rid, &Item{
-		RelPath: "Movies/film.mkv", MediaType: "video", QuickHash: "qv",
+		RelPath: "Movies/film.mkv", FileCategory: "video", QuickHash: "qv",
 	})
 	// Excluded: a document (not thumbnailable on the agent).
 	insertThumbItem(t, st, rid, &Item{
-		RelPath: "Docs/manual.pdf", MediaType: "document", QuickHash: "qd",
+		RelPath: "Docs/manual.pdf", FileCategory: "document", QuickHash: "qd",
 	})
 	// Excluded: an unhashed image (no addressable key yet).
 	insertThumbItem(t, st, rid, &Item{
-		RelPath: "Photos/nohash.png", MediaType: "image",
+		RelPath: "Photos/nohash.png", FileCategory: "image",
 	})
 
 	cands, err := st.ThumbCandidates(ctx)
@@ -96,7 +96,7 @@ func TestThumbMarkersRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	rid := rootID(t, st, "/media")
 	it := insertThumbItem(t, st, rid, &Item{
-		RelPath: "a.png", MediaType: "image", ContentHash: "ch",
+		RelPath: "a.png", FileCategory: "image", ContentHash: "ch",
 	})
 
 	if m, _ := st.ThumbMarkers(ctx, it.ID); len(m) != 0 {
@@ -130,7 +130,7 @@ func TestThumbMarkerCascadeOnItemDelete(t *testing.T) {
 	st, _ := openTemp(t)
 	ctx := context.Background()
 	rid := rootID(t, st, "/media")
-	it := insertThumbItem(t, st, rid, &Item{RelPath: "a.png", MediaType: "image", ContentHash: "ch"})
+	it := insertThumbItem(t, st, rid, &Item{RelPath: "a.png", FileCategory: "image", ContentHash: "ch"})
 	if err := st.MarkThumb(ctx, it.ID, thumbs.TierGrid, "k"); err != nil {
 		t.Fatal(err)
 	}

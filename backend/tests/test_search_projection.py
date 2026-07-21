@@ -9,14 +9,14 @@ import pytest
 from meilisearch_python_sdk.models.settings import MeilisearchSettings
 
 from filearr import search as search_mod
-from filearr.models import Item, ItemStatus, MediaType
+from filearr.models import Item, ItemStatus
 
 
 def _make_item(sidecar_of=None):
     return Item(
         id=uuid.uuid4(),
         library_id=uuid.uuid4(),
-        media_type=MediaType.image if sidecar_of else MediaType.video,
+        file_category="image", file_group="raster-photo" if sidecar_of else "video",
         path="/data/a.jpg" if sidecar_of else "/data/a.mkv",
         rel_path="a.jpg" if sidecar_of else "a.mkv",
         filename="a.jpg" if sidecar_of else "a.mkv",
@@ -98,6 +98,6 @@ def test_search_filters_exclude_sidecars_by_default():
     assert "is_sidecar = false" not in f
 
     # combined with other filters, exclusion still applied
-    f2 = build_filters(type="video", status="active")
-    assert "media_type = 'video'" in f2
+    f2 = build_filters(file_category=["video"], status="active")
+    assert any("file_category = 'video'" in c for c in f2)
     assert "is_sidecar = false" in f2

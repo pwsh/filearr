@@ -9,13 +9,13 @@ import pytest
 from filearr import search as search_mod
 from filearr.custom_fields import CustomFieldDef, project_custom_fields_to_meili
 from filearr.meili_ops import FACET_SEARCH_DISABLED, FILTERABLE_ATTRIBUTES
-from filearr.models import Item, ItemStatus, MediaType
+from filearr.models import Item, ItemStatus
 
 
 def _item(meta=None, user=None) -> Item:
     return Item(
         library_id=None,
-        media_type=MediaType.image,
+        file_category="image", file_group="raster-photo",
         status=ItemStatus.active,
         path="/data/x.jpg",
         rel_path="x.jpg",

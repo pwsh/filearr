@@ -3,11 +3,12 @@
   import {
     cancelScan, clearFailedJobs, createLibrary, forceClearScan, stopScan, failedJobs, libraryErrors,
     listLibraries, listPresets, listScans, listShareMap, resolveShareHint,
-    retryExtracts, scanEventsUrl, scanLibrary, getVersion,
+    retryExtracts, scanEventsUrl, scanLibrary, targetedScan, getTaxonomy,
     stats as fetchStats,
     type FailedJob, type FailingItem, type Library,
-    type PresetsResponse, type ScanRun, type ShareMapEntry,
+    type PresetsResponse, type ScanRun, type ShareMapEntry, type TaxonomyNode,
   } from "./api";
+  import TaxonomySelector from "./TaxonomySelector.svelte";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
   import { formatShare, shareLocation } from "./osFormat";
@@ -34,7 +35,6 @@
     $props();
   const isAdmin = $derived(!!me && me.global_role === "admin");
   // P5-T1: the distributed-agent fleet panel is opt-in (FILEARR_AGENTS_ENABLED).
-  let agentsEnabled = $state(false);
 
   let libraries = $state<Library[]>([]);
   let scans = $state<ScanRun[]>([]);
@@ -61,6 +61,51 @@
   let editing = $state<Library | null>(null);
   let deleting = $state<Library | null>(null);
 
+  // W9 targeted-scan dialog: rescan a specific file/folder path under a library
+  // (automation-style — the path need not appear in the catalog yet, but must
+  // exist on disk; a 404 is surfaced inline). recursive is ignored for a file.
+  let targeting = $state<Library | null>(null);
+  let tgtPath = $state("");
+  let tgtRecursive = $state(true);
+  let tgtBusy = $state(false);
+  let tgtMsg = $state<{ ok: boolean; text: string } | null>(null);
+
+  function openTargeted(lib: Library) {
+    targeting = lib;
+    tgtPath = "";
+    tgtRecursive = true;
+    tgtMsg = null;
+  }
+
+  async function submitTargeted(e: Event) {
+    e.preventDefault();
+    if (!targeting || tgtBusy) return;
+    tgtBusy = true;
+    tgtMsg = null;
+    const target = tgtPath.trim();
+    try {
+      const r = await targetedScan(targeting.id, { path: target, recursive: tgtRecursive });
+      tgtMsg = {
+        ok: true,
+        text: r.coalesced
+          ? `Already scanning "${target || "whole library"}" — joined it.`
+          : `Queued scan of "${target || "whole library"}"${r.is_file ? " (file)" : ""}.`,
+      };
+      // Same deferred-job race as runScan: only mark the row queued when a NEW
+      // run was created. A coalesced request joined a run that is already live,
+      // and the row should keep showing that run's progress.
+      if (!r.coalesced) {
+        queued = { ...queued, [targeting.id]: Date.now() };
+        void pollUntilStarted(targeting.id);
+      }
+      await refresh();
+    } catch (err) {
+      tgtMsg = { ok: false, text: String(err) };
+    } finally {
+      tgtBusy = false;
+    }
+  }
+
   // create form
   let newName = $state("");
   let newPath = $state("/data/media/");
@@ -83,8 +128,12 @@
       : null,
   );
   let showAddPicker = $state(false);
-  const ALL_TYPES = ["video", "audio", "audiobook", "sample", "image", "model3d", "document", "spreadsheet"];
-  let newTypes = $state<string[]>([]);
+  // W8: the file taxonomy tree (category -> group -> extensions) drives both the
+  // add-library gating selector and (passed down) the edit modal's. Fetched once
+  // on mount; an empty tree (service offline) degrades to "all types".
+  let taxonomyTree = $state<TaxonomyNode[]>([]);
+  let newCategories = $state<string[]>([]);
+  let newGroups = $state<string[]>([]);
   let newCron = $state("");
   let newWatch = $state(false);
   const HASH_POLICIES = ["auto", "full", "quick_only"] as const;
@@ -94,7 +143,10 @@
   // Live scan progress, keyed by scan id, delivered over SSE. Merged over the
   // scan rows so the table shows batch counter + files/s ticking in real time.
   type Live = { status: string; seen?: number; new?: number; changed?: number;
-    missing?: number; rate?: number; elapsed?: number };
+    missing?: number; rate?: number; elapsed?: number;
+    // Files enumerated but skipped, streamed live so a mis-scoped library is
+    // obvious while the scan runs rather than only after it finishes.
+    excluded?: number; bytes_seen?: number };
   let live = $state<Record<string, Live>>({});
 
   // One EventSource per actively-streamed scan id, plus reconnect backoff state.
@@ -296,16 +348,56 @@
     return scans.find((s) => s.library_id === libId); // scans come newest-first
   }
 
+  // Optimistic scan feedback. POST /libraries/{id}/scan only DEFERS a job — the
+  // ScanRun row is created later, by the worker — so refresh() immediately after
+  // the click usually still returns the PREVIOUS scan and the button looks like
+  // it did nothing (the safety poll is 30s away). Record the request time on
+  // click and let the row report "queued" until its own run appears.
+  let queued = $state<Record<string, number>>({});
+
+  // True from the moment a scan is requested until its ScanRun row exists. The
+  // 2s slack absorbs browser/server clock skew so we still recognise our run.
+  function isQueued(libId: string): boolean {
+    const at = queued[libId];
+    if (!at) return false;
+    const s = latestScan(libId);
+    if (!s) return true;
+    if (Date.parse(s.started_at) >= at - 2000) return false; // our run exists
+    // The request was DEDUPED into a scan that was already in flight (the API
+    // coalesces rather than stacking runs). That older run is the real state —
+    // show its live progress instead of a "queued" that would never clear.
+    return !(s.status === "running" || s.status === "stopping");
+  }
+
+  // The worker normally picks the job up within a second or two. Poll a short
+  // decaying burst so the row flips from "queued" to live progress promptly
+  // rather than sitting there until the 30s safety poll. Fire-and-forget: the
+  // button is already re-enabled, so this never blocks another click.
+  async function pollUntilStarted(libId: string) {
+    for (const delay of [800, 1500, 3000, 5000, 8000]) {
+      if (!isQueued(libId)) return;
+      await new Promise((r) => setTimeout(r, delay));
+      await refresh();
+    }
+  }
+
   async function runScan(lib: Library) {
     busy[lib.id] = true;
+    queued = { ...queued, [lib.id]: Date.now() }; // reassign, don't mutate
     try {
       await scanLibrary(lib.id);
       await refresh();
     } catch (e) {
       error = String(e);
+      // The enqueue itself failed, so nothing is pending — drop the marker
+      // rather than leaving a "queued" row that will never start.
+      const { [lib.id]: _failed, ...rest } = queued;
+      queued = rest;
+      return;
     } finally {
       busy[lib.id] = false;
     }
+    void pollUntilStarted(lib.id);
   }
 
   async function addLibrary(e: Event) {
@@ -316,7 +408,8 @@
         root_path: newPath,
         native_prefix: newNativePrefix.trim() || null,
         share_prefix: newSharePrefix.trim() || null,
-        enabled_types: newTypes.length ? newTypes : undefined,
+        enabled_categories: newCategories.length ? newCategories : undefined,
+        enabled_groups: newGroups.length ? newGroups : undefined,
         scan_cron: newCron.trim() || null,
         watch_mode: newWatch,
         hash_policy: newHashPolicy,
@@ -325,7 +418,8 @@
       newName = "";
       newNativePrefix = "";
       newSharePrefix = "";
-      newTypes = [];
+      newCategories = [];
+      newGroups = [];
       newCron = "";
       newWatch = false;
       newHashPolicy = "auto";
@@ -336,21 +430,18 @@
     }
   }
 
-  function toggleType(t: string) {
-    newTypes = newTypes.includes(t) ? newTypes.filter((x) => x !== t) : [...newTypes, t];
-  }
-
   function fmtStats(s: ScanRun | undefined): string {
     if (!s) return "never scanned";
     const active = s.status === "running" || s.status === "stopping";
     const lv = active ? live[s.id] : undefined;
     const st: Record<string, number | undefined> = lv
-      ? { seen: lv.seen, new: lv.new, changed: lv.changed, missing: lv.missing }
+      ? { seen: lv.seen, new: lv.new, changed: lv.changed, missing: lv.missing,
+          excluded: lv.excluded }
       : (s.stats ?? {});
     const status = lv?.status ?? s.status;
     const inProgress = status === "running" || status === "stopping";
     const base = `${status}${s.finished_at || !inProgress ? "" : "…"}`;
-    const parts = ["seen", "new", "changed", "missing"]
+    const parts = ["seen", "new", "changed", "missing", "excluded"]
       .filter((k) => st[k] !== undefined)
       .map((k) => `${k} ${st[k]}`);
     if (lv && lv.rate !== undefined) parts.push(`${lv.rate.toFixed(1)}/s`);
@@ -388,6 +479,65 @@
       .join(", ");
   }
 
+  // Which libraries have their exclusion breakdown panel open. A native
+  // `title=` tooltip only appears after a hover delay and ignores clicks, so the
+  // badge looked broken; the breakdown is now click-to-open (title kept as a
+  // bonus for hover users).
+  let excludedOpen = $state<Record<string, boolean>>({});
+
+  function toggleExcluded(libId: string) {
+    excludedOpen = { ...excludedOpen, [libId]: !excludedOpen[libId] };
+  }
+
+  // Structured breakdown for the click-to-open panel — one cause per line, so it
+  // stays readable. excludedDetail() below flattens the same facts for `title`.
+  function excludedLines(ls: NonNullable<Library["last_scan"]>): string[] {
+    const out: string[] = [];
+    if (ls.excluded_gate)
+      out.push(`${ls.excluded_gate.toLocaleString()} rejected by this library's category/group selection.`);
+    if (ls.excluded_filtered)
+      out.push(`${ls.excluded_filtered.toLocaleString()} rejected by exclusion presets/globs (system files, hidden dotfiles, …).`);
+    if (ls.pruned_counted && ls.pruned_files)
+      out.push(`${ls.pruned_files.toLocaleString()} inside ${ls.pruned_dirs ?? 0} pruned folder(s). seen + excluded + pruned now accounts for every file on disk.`);
+    else if (ls.pruned_dirs)
+      out.push(`${ls.pruned_dirs} folder(s) were pruned and their contents were NOT counted, so this total is a lower bound — expect your OS to report more files. Turn on “Count files in pruned folders” in this library's settings to make it reconcile exactly.`);
+    if (ls.pruned_paths?.length)
+      out.push(`Pruned: ${ls.pruned_paths.slice(0, 8).join(", ")}${ls.pruned_paths.length > 8 ? ", …" : ""}`);
+    if (ls.permission_denied)
+      out.push(`${ls.permission_denied} folder(s) could not be read at all — contents not counted (same caveat).`);
+    return out;
+  }
+
+  // Why the scan skipped files. Rendered as its own badge (not folded into
+  // lastScanCounts) because it is the number that explains a gap between an OS
+  // folder count and the library total — `seen` alone never could.
+  function excludedDetail(ls: NonNullable<Library["last_scan"]>): string {
+    const why: string[] = [];
+    if (ls.excluded_gate)
+      why.push(`${ls.excluded_gate} rejected by this library's category/group selection`);
+    if (ls.excluded_filtered)
+      why.push(`${ls.excluded_filtered} rejected by exclusion presets/globs (system files, hidden dotfiles, …)`);
+    let s = why.length
+      ? `${ls.excluded} file(s) enumerated but not ingested — ${why.join("; ")}.`
+      : `${ls.excluded} file(s) enumerated but not ingested.`;
+
+    // THE DISCREPANCY NOTE. Pruned/unreadable directories are skipped WITHOUT
+    // being enumerated, so files inside them are counted nowhere. If the numbers
+    // do not add up against the OS, this is nearly always why — so point the
+    // operator straight at it, name the culprits, and name the fix.
+    if (ls.pruned_counted && ls.pruned_files) {
+      s += ` Plus ${ls.pruned_files.toLocaleString()} file(s) inside ${ls.pruned_dirs ?? 0} pruned director(ies), so seen + excluded + pruned = every file on disk.`;
+    } else if (ls.pruned_dirs) {
+      s += ` HEADS UP: ${ls.pruned_dirs} director(ies) were pruned entirely and their contents were NOT enumerated, so this count is a LOWER BOUND — expect the OS folder count to be higher.`;
+      s += ` Enable "Count files in pruned folders" in this library's settings to make the numbers reconcile exactly.`;
+    }
+    if (ls.pruned_paths?.length)
+      s += ` Pruned: ${ls.pruned_paths.slice(0, 8).join(", ")}${ls.pruned_paths.length > 8 ? ", …" : ""}.`;
+    if (ls.permission_denied)
+      s += ` ${ls.permission_denied} director(ies) could not be read at all (same lower-bound caveat).`;
+    return s;
+  }
+
   // After a successful edit or delete, close the modal and reconcile everything.
   function afterEdit() {
     editing = null;
@@ -404,9 +554,11 @@
     listPresets()
       .then((m) => (presetsMeta = m))
       .catch((e) => (error = String(e)));
-    getVersion()
-      .then((v) => (agentsEnabled = !!v.agents_enabled))
-      .catch(() => (agentsEnabled = false));
+    // W8: taxonomy for the type-gating selectors. Non-fatal — an empty tree just
+    // means the selector shows "all types" and libraries can still be created.
+    getTaxonomy()
+      .then((t) => (taxonomyTree = t.tree))
+      .catch(() => (taxonomyTree = []));
     safety = setInterval(refresh, 30000);
   });
   onDestroy(() => {
@@ -416,7 +568,16 @@
 </script>
 
 <div class="mt-4">
-  <h2 class="text-lg font-semibold">Libraries</h2>
+  <div class="flex items-center gap-3">
+    <h2 class="text-lg font-semibold">Libraries</h2>
+    <div class="grow"></div>
+    <!-- W8: the taxonomy editor lives on its own route, reachable from here. -->
+    <a
+      href="#/taxonomy"
+      class="rounded-lg border border-slate-300 px-3 py-1 text-sm text-slate-600 dark:border-slate-700 dark:text-slate-300">
+      Manage file taxonomy
+    </a>
+  </div>
 
   {#if error}<p class="mt-2 text-sm text-red-500">{error}</p>{/if}
 
@@ -451,9 +612,12 @@
             </td>
             <td class="py-2 pr-3">
               <span class="inline-flex flex-wrap gap-1">
-                {#if lib.enabled_types?.length}
-                  {#each lib.enabled_types as t}
-                    <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">{t}</span>
+                {#if lib.enabled_categories?.length || lib.enabled_groups?.length}
+                  {#each lib.enabled_categories ?? [] as c}
+                    <span class="rounded bg-[var(--accent)]/15 px-1.5 py-0.5 text-[10px] text-[var(--accent)]" title="category">{c}</span>
+                  {/each}
+                  {#each lib.enabled_groups ?? [] as g}
+                    <span class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300" title="group">{g}</span>
                   {/each}
                 {:else}
                   <span class="text-xs text-slate-400">all</span>
@@ -465,7 +629,9 @@
             </td>
             <td class="py-2 pr-3 font-mono text-xs text-slate-500">{lib.scan_cron ?? "—"}</td>
             <td class="py-2 pr-3 text-xs text-slate-500">{lib.watch_mode ? "on" : "—"}</td>
-            <td class="py-2 pr-3">
+            <!-- nowrap: the count badge + retry button previously stacked, which
+                 alone made the whole row two lines tall. -->
+            <td class="whitespace-nowrap py-2 pr-3">
               <button
                 class="rounded-full px-2 py-0.5 text-xs font-medium {ec > 0 ? 'bg-red-500 text-white' : 'bg-slate-200 text-slate-500 dark:bg-slate-800'}"
                 title={ec > 0 ? "Show failing items" : "No extraction errors"}
@@ -482,17 +648,56 @@
                 </button>
               {/if}
             </td>
-            <td class="py-2 pr-3 text-xs text-slate-500">
+            <!-- nowrap keeps status + age + counts + the excluded badge on ONE
+                 line (there is ample width before the Actions column); the
+                 expanded breakdown below re-enables wrapping. -->
+            <td class="whitespace-nowrap py-2 pr-3 text-xs text-slate-500">
               <!-- FIX-10: a running/stopping scan is streamed live; otherwise the
                    authoritative last scan comes from lib.last_scan (scan_runs
                    DISTINCT ON), which survives redeploys. "never" only when null. -->
-              {#if scan && (scan.status === "running" || scan.status === "stopping")}
+              {#if isQueued(lib.id)}
+                <!-- Optimistic: the job is deferred but the worker has not
+                     created its ScanRun yet. Without this the click produced no
+                     visible change for up to 30s. -->
+                <span class="inline-flex items-center gap-1 rounded-full bg-[var(--accent)] px-1.5 py-0.5 text-[10px] font-medium text-white">
+                  <span class="inline-block h-1.5 w-1.5 animate-ping rounded-full bg-white"></span>
+                  queued
+                </span>
+                <span class="ml-1 text-slate-400">waiting for a worker…</span>
+              {:else if scan && (scan.status === "running" || scan.status === "stopping")}
                 {fmtStats(scan)}
               {:else if lib.last_scan}
                 {@const ls = lib.last_scan}
                 <span class="rounded-full px-1.5 py-0.5 text-[10px] font-medium {lastScanClass(ls.status)}">{ls.status}</span>
                 <span class="ml-1" title={new Date(ls.finished_at ?? ls.started_at).toLocaleString()}>{relTime(ls.finished_at ?? ls.started_at)}</span>
                 {#if lastScanCounts(ls)}<span class="ml-1 text-slate-400">— {lastScanCounts(ls)}</span>{/if}
+                <!-- Render when anything was skipped, INCLUDING the pruned-only
+                     case (excluded 0 but whole trees dropped) — that case is
+                     exactly the one that silently loses tens of thousands of
+                     files. The trailing "+" marks a lower-bound count. -->
+                {#if ls.excluded || ls.pruned_dirs}
+                  {@const lowerBound = !!ls.pruned_dirs && !ls.pruned_counted}
+                  <button
+                    type="button"
+                    class="ml-1 cursor-pointer text-amber-600 underline decoration-dotted underline-offset-2 hover:decoration-solid dark:text-amber-400"
+                    title={excludedDetail(ls)}
+                    aria-expanded={!!excludedOpen[lib.id]}
+                    onclick={() => toggleExcluded(lib.id)}
+                  >excluded {(ls.excluded ?? 0).toLocaleString()}{lowerBound
+                      ? "+"
+                      : ls.pruned_files
+                        ? ` + ${ls.pruned_files.toLocaleString()} pruned`
+                        : ""}
+                    <span class="text-[9px]">{excludedOpen[lib.id] ? "▲" : "▼"}</span>
+                  </button>
+                  {#if excludedOpen[lib.id]}
+                    <ul class="mt-1 max-w-xl list-disc space-y-1 whitespace-normal rounded border border-amber-300/60 bg-amber-50 py-2 pl-6 pr-2 text-[11px] leading-snug text-slate-600 dark:border-amber-800/60 dark:bg-amber-950/30 dark:text-slate-300">
+                      {#each excludedLines(ls) as line}
+                        <li>{line}</li>
+                      {/each}
+                    </ul>
+                  {/if}
+                {/if}
               {:else}
                 never scanned
               {/if}
@@ -537,6 +742,10 @@
                   onclick={() => gotoBrowse(lib.id, "")}>Browse</button>
                 <button
                   class="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
+                  title="Rescan a specific file or folder under this library (no full scan)"
+                  onclick={() => openTargeted(lib)}>Targeted…</button>
+                <button
+                  class="rounded-lg border border-slate-300 px-2 py-1 text-xs text-slate-600 dark:border-slate-700 dark:text-slate-300"
                   onclick={() => (editing = lib)}>Edit</button>
                 <button
                   class="rounded-lg border border-red-300 px-2 py-1 text-xs text-red-500 dark:border-red-800"
@@ -545,7 +754,15 @@
                   class="rounded-lg bg-[var(--accent)] px-2 py-1 text-xs text-white disabled:opacity-50"
                   disabled={busy[lib.id]}
                   onclick={() => runScan(lib)}>
-                  {running || stopping ? "Restart" : "Scan"}
+                  {#if busy[lib.id]}
+                    Starting…
+                  {:else if isQueued(lib.id)}
+                    Queued
+                  {:else if running || stopping}
+                    Restart
+                  {:else}
+                    Scan
+                  {/if}
                 </button>
               </div>
             </td>
@@ -607,14 +824,9 @@
       </p>
     {/if}
 
-    <label class="flex items-center gap-1 text-xs text-slate-500">Media types <Help text={HELP.media_types} label="media types" /></label>
-    <div class="-mt-2 flex flex-wrap gap-2">
-      {#each ALL_TYPES as t}
-        <button type="button"
-          class="rounded-full border px-3 py-1 text-sm {newTypes.includes(t) ? 'bg-[var(--accent)] text-white border-transparent' : 'border-slate-300 dark:border-slate-700'}"
-          onclick={() => toggleType(t)}>{t}</button>
-      {/each}
-      <span class="self-center text-xs text-slate-500">(none selected = all types)</span>
+    <label class="flex items-center gap-1 text-xs text-slate-500">File types <Help text={HELP.media_types} label="file types" /></label>
+    <div class="-mt-2">
+      <TaxonomySelector tree={taxonomyTree} bind:categories={newCategories} bind:groups={newGroups} />
     </div>
 
     <div class="flex flex-col gap-2">
@@ -662,24 +874,6 @@
 
   {#if isAdmin}
     <AuditPanel />
-  {/if}
-
-  {#if (isAdmin || authDisabled) && agentsEnabled}
-    <!-- W6-D4: agent config/management/status now lives on its own page. -->
-    <div class="mt-8 flex items-center gap-3 rounded-xl border border-slate-200 p-4 dark:border-slate-800">
-      <div>
-        <h2 class="text-lg font-semibold">Agents (distributed fleet)</h2>
-        <p class="mt-1 text-xs text-slate-500">
-          Agent management moved to its own page — fleet status, enrollment,
-          installer sidecar, and config groups.
-        </p>
-      </div>
-      <div class="grow"></div>
-      <a href="#/agents"
-        class="rounded-lg bg-[var(--accent)] px-3 py-1.5 text-sm text-white">
-        Agent management →
-      </a>
-    </div>
   {/if}
 
   <h2 class="mt-8 text-lg font-semibold">Recent scans</h2>
@@ -752,6 +946,7 @@
   <LibraryEditModal
     library={editing}
     {presetsMeta}
+    {taxonomyTree}
     onSaved={afterEdit}
     onClose={() => (editing = null)}
   />
@@ -771,4 +966,51 @@
     onPick={(p) => { newPath = p; showAddPicker = false; }}
     onClose={() => (showAddPicker = false)}
   />
+{/if}
+
+{#if targeting}
+  <div
+    class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+    role="button"
+    tabindex="-1"
+    onclick={(e) => { if (e.target === e.currentTarget) targeting = null; }}
+    onkeydown={(e) => { if (e.key === "Escape") targeting = null; }}>
+    <div class="w-full max-w-md rounded-xl border border-slate-200 bg-white p-4 shadow-xl dark:border-slate-800 dark:bg-slate-900">
+      <h3 class="text-base font-semibold">Targeted scan — {targeting.name}</h3>
+      <p class="mt-1 text-xs text-slate-500">
+        Rescan one file or folder under this library. The path need not be in the
+        catalog yet, but must exist on disk (e.g. a freshly created folder).
+      </p>
+      <form class="mt-3 flex flex-col gap-3" onsubmit={submitTargeted}>
+        <label class="flex flex-col gap-1 text-xs text-slate-500">
+          Path under the library root (blank = whole library)
+          <input
+            class="rounded-lg border border-slate-300 bg-transparent px-3 py-2 font-mono text-sm dark:border-slate-700"
+            placeholder="e.g. Movies/Incoming or Movies/Incoming/x.mkv"
+            bind:value={tgtPath} />
+        </label>
+        <label class="flex items-center gap-2 text-sm" title="Ignored when the path is a file">
+          <input type="checkbox" bind:checked={tgtRecursive} />
+          Include subfolders
+        </label>
+        {#if tgtMsg}
+          <p class="text-xs {tgtMsg.ok ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-500'}">
+            {tgtMsg.text}
+          </p>
+        {/if}
+        <div class="flex justify-end gap-2">
+          <button
+            type="button"
+            class="rounded-lg border border-slate-300 px-3 py-1 text-sm dark:border-slate-700"
+            onclick={() => (targeting = null)}>Close</button>
+          <button
+            type="submit"
+            disabled={tgtBusy}
+            class="rounded-lg bg-[var(--accent)] px-3 py-1 text-sm font-medium text-white disabled:opacity-50">
+            {tgtBusy ? "Queueing…" : "Scan"}
+          </button>
+        </div>
+      </form>
+    </div>
+  </div>
 {/if}

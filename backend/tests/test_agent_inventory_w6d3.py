@@ -23,7 +23,7 @@ from filearr import db as db_mod
 from filearr.config import get_settings
 from filearr.db import get_session
 from filearr.main import create_app
-from filearr.models import Agent, AgentCommand, Item, Library, MediaType
+from filearr.models import Agent, AgentCommand, Item, Library
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 
@@ -56,7 +56,7 @@ async def _seed(maker) -> tuple[uuid.UUID, uuid.UUID, str]:
         await s.flush()
         item = Item(
             library_id=lib.id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             path="/data/x.mkv",
             rel_path="x.mkv",
             filename="x.mkv",

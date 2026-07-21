@@ -29,7 +29,7 @@ func insert(t *testing.T, st *Store, rootID, rel string, sidecar bool) *Item {
 	it := &Item{
 		ID: id, RootID: rootID, RelPath: rel, Filename: filepath.Base(rel),
 		Extension: "mkv", Size: 10, MtimeNs: time.Now().UnixNano(),
-		QuickHash: "q", MediaType: "video", Status: StatusActive, IsSidecar: sidecar,
+		QuickHash: "q", FileCategory: "video", Status: StatusActive, IsSidecar: sidecar,
 		FirstSeen: time.Now(), LastSeen: time.Now(),
 	}
 	if err := InsertItem(ctx, tx, it); err != nil {

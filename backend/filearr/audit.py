@@ -106,6 +106,21 @@ AGENT_RELEASE_UPLOADED = "agent_release_uploaded"
 AGENT_RELEASE_PROMOTED = "agent_release_promoted"
 # FIX-15 operator repair action: force-clearing a stuck ScanRun terminal.
 SCAN_FORCE_CLEARED = "scan_force_cleared"
+# W9 targeted (file / directory, optionally recursive) rescan trigger. Records the
+# library + the rel path + recursion mode + whether it coalesced onto an in-flight
+# scan of the same scope. A write-scoped, automation-facing action worth auditing.
+SCAN_TARGETED = "scan_targeted"
+# W8-A File Extension Similarity Taxonomy edits (admin CRUD). Each records the
+# affected category/group key or extension + the new taxonomy version; never the
+# whole taxonomy body.
+TAXONOMY_CATEGORY_CREATED = "taxonomy_category_created"
+TAXONOMY_CATEGORY_UPDATED = "taxonomy_category_updated"
+TAXONOMY_CATEGORY_DELETED = "taxonomy_category_deleted"
+TAXONOMY_GROUP_CREATED = "taxonomy_group_created"
+TAXONOMY_GROUP_UPDATED = "taxonomy_group_updated"
+TAXONOMY_GROUP_DELETED = "taxonomy_group_deleted"
+TAXONOMY_EXTENSION_ADDED = "taxonomy_extension_added"
+TAXONOMY_EXTENSION_REMOVED = "taxonomy_extension_removed"
 
 _SECRET_SUBSTRINGS = (
     "password",

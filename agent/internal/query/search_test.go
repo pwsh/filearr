@@ -29,18 +29,18 @@ func seed(t *testing.T, now time.Time) string {
 	tx.Commit()
 
 	type row struct {
-		rel, ext, media, qhash, chash string
-		size                          int64
-		ageDays                       int // mtime/first_seen = now - ageDays
-		sidecar                       bool
+		rel, ext, media, group, qhash, chash string
+		size                                 int64
+		ageDays                              int // mtime/first_seen = now - ageDays
+		sidecar                              bool
 	}
 	rows := []row{
-		{rel: "Movies/Arcane.S01E01.mkv", ext: "mkv", media: "video", size: 2 * 1024 * 1024 * 1024, ageDays: 1, qhash: "aa11", chash: "cc11"},
-		{rel: "Movies/Arcane.S01E01.nfo", ext: "nfo", media: "other", size: 2048, ageDays: 1, sidecar: true},
-		{rel: "Music/Song.flac", ext: "flac", media: "audio", size: 40 * 1024 * 1024, ageDays: 40},
-		{rel: "Docs/Annual-Report-2025.pdf", ext: "pdf", media: "document", size: 500 * 1024, ageDays: 10, qhash: "bb22"},
-		{rel: "Docs/notes.txt", ext: "txt", media: "document", size: 100, ageDays: 100},
-		{rel: "Photos/beach.jpg", ext: "jpg", media: "image", size: 3 * 1024 * 1024, ageDays: 3},
+		{rel: "Movies/Arcane.S01E01.mkv", ext: "mkv", media: "video", group: "video", size: 2 * 1024 * 1024 * 1024, ageDays: 1, qhash: "aa11", chash: "cc11"},
+		{rel: "Movies/Arcane.S01E01.nfo", ext: "nfo", media: "other", group: "other", size: 2048, ageDays: 1, sidecar: true},
+		{rel: "Music/Song.flac", ext: "flac", media: "audio", group: "audio-lossless", size: 40 * 1024 * 1024, ageDays: 40},
+		{rel: "Docs/Annual-Report-2025.pdf", ext: "pdf", media: "document", group: "pdf", size: 500 * 1024, ageDays: 10, qhash: "bb22"},
+		{rel: "Docs/notes.txt", ext: "txt", media: "document", group: "document-text", size: 100, ageDays: 100},
+		{rel: "Photos/beach.jpg", ext: "jpg", media: "image", group: "raster-photo", size: 3 * 1024 * 1024, ageDays: 3},
 	}
 	for _, r := range rows {
 		tx, _ := st.Begin(ctx)
@@ -49,7 +49,7 @@ func seed(t *testing.T, now time.Time) string {
 		it := &index.Item{
 			ID: id, RootID: rid, RelPath: r.rel, Filename: filepath.Base(r.rel),
 			Extension: r.ext, Size: r.size, MtimeNs: ts.UnixNano(),
-			QuickHash: r.qhash, ContentHash: r.chash, MediaType: r.media,
+			QuickHash: r.qhash, ContentHash: r.chash, FileCategory: r.media, FileGroup: r.group,
 			Status: index.StatusActive, IsSidecar: r.sidecar, FirstSeen: ts, LastSeen: ts,
 		}
 		if err := index.InsertItem(ctx, tx, it); err != nil {
@@ -104,6 +104,8 @@ func TestExecutionMatrix(t *testing.T) {
 		{name: "term", q: "arcane", want: []string{"Movies/Arcane.S01E01.mkv"}, exactly: true},
 		{name: "kind_video", q: "kind:video", want: []string{"Movies/Arcane.S01E01.mkv"}, exactly: true},
 		{name: "kind_document", q: "kind:document", want: []string{"Docs/Annual-Report-2025.pdf", "Docs/notes.txt"}, exactly: true},
+		{name: "group_pdf", q: "group:pdf", want: []string{"Docs/Annual-Report-2025.pdf"}, exactly: true},
+		{name: "group_audio_lossless", q: "group:audio-lossless", want: []string{"Music/Song.flac"}, exactly: true},
 		{name: "ext_single", q: "ext:flac", want: []string{"Music/Song.flac"}, exactly: true},
 		{name: "ext_list", q: "ext:jpg;flac", want: []string{"Photos/beach.jpg", "Music/Song.flac"}, exactly: true},
 		{name: "size_gt_1G", q: "size:>1G", want: []string{"Movies/Arcane.S01E01.mkv"}, exactly: true},
@@ -278,7 +280,7 @@ func TestReadOnlyIsolation(t *testing.T) {
 	id, _ := index.NewID()
 	tsn := now.UnixNano()
 	it := &index.Item{ID: id, RootID: rid, RelPath: "Late/zznew.mkv", Filename: "zznew.mkv",
-		Extension: "mkv", Size: 5, MtimeNs: tsn, MediaType: "video", Status: index.StatusActive,
+		Extension: "mkv", Size: 5, MtimeNs: tsn, FileCategory: "video", Status: index.StatusActive,
 		FirstSeen: now, LastSeen: now}
 	if err := index.InsertItem(ctx, tx, it); err != nil {
 		t.Fatal(err)

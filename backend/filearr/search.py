@@ -25,6 +25,7 @@ from filearr.custom_fields import (
 )
 from filearr.embed import EMBEDDING_KEY, has_current_embedding
 from filearr.exif import strip_gps
+from filearr.file_groups import detect_category, detect_group
 from filearr.meili_ops import (
     DEFAULT_EMBEDDER_NAME,
     DISABLE_TYPO_ATTRIBUTES,
@@ -496,7 +497,21 @@ def build_doc(
     doc = {
         "id": str(item.id),
         "library_id": str(item.library_id),
-        "media_type": item.media_type.value,
+        # W8 File Extension Similarity Taxonomy (the authoritative successor to the
+        # removed media_type): the coarse ``file_category`` parent + the finer
+        # ``file_group`` child. PREFER the STORED item columns (set at scan/replication time by the
+        # DB-backed ``filearr.taxonomy`` service, so a runtime taxonomy EDIT is
+        # reflected after a rescan); fall back to the pure SEED classifier when a row
+        # predates W8-A / was never re-scanned (build_doc has no DB session, so it
+        # cannot read the live taxonomy itself — that seed-vs-runtime split is
+        # documented in ``filearr.file_groups`` / ``filearr.taxonomy``). Keyed on
+        # ``rel_path`` (identity, invariant 3), falling back to the absolute
+        # ``path``. A SIDECAR gets its OWN extension's group (e.g. a poster.jpg
+        # sidecar -> raster-photo), NOT the parent's. Both are filterable Meili
+        # facets — adding them is genuine settings drift → a rebuild-index re-projects
+        # existing docs (ops runbook).
+        "file_category": item.file_category or detect_category(item.rel_path or item.path or ""),
+        "file_group": item.file_group or detect_group(item.rel_path or item.path or ""),
         "status": item.status.value,
         "path": item.path,
         "rel_path": item.rel_path,

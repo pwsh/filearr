@@ -10,6 +10,7 @@
   import {
     updateLibrary,
     type ExtensionGroup, type HashPolicy, type Library, type Preset, type PresetsResponse,
+    type TaxonomyNode,
   } from "./api";
   import { HELP } from "./help";
   import Help from "./Help.svelte";
@@ -17,15 +18,18 @@
   import { shareFormat, detectedPlatform } from "./osFormat.svelte";
   import FolderPicker from "./FolderPicker.svelte";
   import ScheduleField from "./ScheduleField.svelte";
+  import TaxonomySelector from "./TaxonomySelector.svelte";
 
   let {
     library,
     presetsMeta,
+    taxonomyTree,
     onSaved,
     onClose,
   }: {
     library: Library;
     presetsMeta: PresetsResponse;
+    taxonomyTree: TaxonomyNode[];
     onSaved: () => void;
     onClose: () => void;
   } = $props();
@@ -46,7 +50,8 @@
     nativePrefix: library.native_prefix ?? "",
     sharePrefix: library.share_prefix ?? "",
     enabled: library.enabled,
-    types: [...(library.enabled_types ?? [])],
+    enabledCategories: [...(library.enabled_categories ?? [])],
+    enabledGroups: [...(library.enabled_groups ?? [])],
     includeGlobs: (library.include_globs ?? []).join("\n"),
     excludeGlobs: (library.exclude_globs ?? []).join("\n"),
     scanCron: library.scan_cron ?? "",
@@ -57,6 +62,7 @@
     groups: [...(library.enabled_extension_groups ?? [])],
     ocrEnabled: library.ocr_enabled,
     exposeGps: library.expose_gps,
+    countPrunedFiles: library.count_pruned_files,
   }));
 
   let name = $state(seed.name);
@@ -75,7 +81,10 @@
       : null,
   );
   let enabled = $state(seed.enabled);
-  let types = $state<string[]>(seed.types);
+  // W8: taxonomy type-gating (replaces the old flat `types`). Distinct from the
+  // legacy `groups` below (P2-T5 extension groups) — these are taxonomy keys.
+  let enabledCategories = $state<string[]>(seed.enabledCategories);
+  let enabledGroups = $state<string[]>(seed.enabledGroups);
   let includeGlobs = $state(seed.includeGlobs);
   let excludeGlobs = $state(seed.excludeGlobs);
   let scanCron = $state(seed.scanCron);
@@ -86,6 +95,7 @@
   let groups = $state<string[]>(seed.groups);
   let ocrEnabled = $state(seed.ocrEnabled);
   let exposeGps = $state(seed.exposeGps);
+  let countPrunedFiles = $state(seed.countPrunedFiles);
 
   let error = $state("");
   let busy = $state(false);
@@ -93,10 +103,6 @@
   let showPatterns = $state<Record<string, boolean>>({});
 
   const rootChanged = $derived(rootPath !== library.root_path);
-
-  function toggleType(t: string) {
-    types = types.includes(t) ? types.filter((x) => x !== t) : [...types, t];
-  }
 
   // Mirrors presets.resolve_effective_presets: a default-on bundle is active
   // unless a `-name` opt-out sentinel is present; others only when listed.
@@ -119,7 +125,7 @@
   }
 
   function groupsForType(mt: string): ExtensionGroup[] {
-    return presetsMeta.extension_groups.filter((g) => g.media_type === mt);
+    return presetsMeta.extension_groups.filter((g) => g.file_category === mt);
   }
 
   function linesToArray(s: string): string[] {
@@ -136,7 +142,8 @@
         native_prefix: nativePrefix.trim() ? nativePrefix.trim() : null,
         share_prefix: sharePrefix.trim() ? sharePrefix.trim() : null,
         enabled,
-        enabled_types: types,
+        enabled_categories: enabledCategories,
+        enabled_groups: enabledGroups,
         include_globs: linesToArray(includeGlobs),
         exclude_globs: linesToArray(excludeGlobs),
         scan_cron: scanCron.trim() ? scanCron.trim() : null,
@@ -147,6 +154,7 @@
         enabled_extension_groups: groups,
         ocr_enabled: ocrEnabled,
         expose_gps: exposeGps,
+        count_pruned_files: countPrunedFiles,
       });
       onSaved();
     } catch (e) {
@@ -257,16 +265,9 @@
         <h4 class="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">Content</h4>
         <div class="grid grid-cols-1 gap-3 sm:grid-cols-[10rem_1fr] sm:items-start">
           <label class="flex items-center gap-1 pt-2 text-slate-600 dark:text-slate-300">
-            Media types <Help text={HELP.media_types} label="media types" />
+            File types <Help text={HELP.media_types} label="file types" />
           </label>
-          <div class="flex flex-wrap gap-2">
-            {#each ALL_TYPES as t}
-              <button type="button"
-                class="rounded-full border px-3 py-1 text-xs {types.includes(t) ? 'border-transparent bg-[var(--accent)] text-white' : 'border-slate-300 dark:border-slate-700'}"
-                onclick={() => toggleType(t)}>{t}</button>
-            {/each}
-            <span class="self-center text-xs text-slate-400">(none = all)</span>
-          </div>
+          <TaxonomySelector tree={taxonomyTree} bind:categories={enabledCategories} bind:groups={enabledGroups} />
 
           <label class="flex items-center gap-1 pt-2 text-slate-600 dark:text-slate-300">
             Include globs <Help text={HELP.include_globs} label="include globs" />
@@ -346,6 +347,24 @@
             <input type="checkbox" class="mt-1" bind:checked={exposeGps} />
             <span class="text-slate-500">
               Show photo GPS/location in search &amp; API. Hidden by default for privacy (CWE-1230).
+            </span>
+          </label>
+
+          <!-- A span, not a <label>: the real label is the one wrapping the
+               checkbox below. (The sibling rows get away with <label> only
+               because a <Help> component inside suppresses the a11y check.) -->
+          <span class="flex items-center gap-1 text-slate-600 dark:text-slate-300">
+            Count pruned
+          </span>
+          <label class="inline-flex items-start gap-2">
+            <input type="checkbox" class="mt-1" bind:checked={countPrunedFiles} />
+            <span class="text-slate-500">
+              Count files inside pruned folders (e.g. <code>.git</code>, <code>.venv</code>)
+              so the scan's <b>seen + excluded + pruned</b> adds up to the file count your OS
+              reports. Those folders are normally skipped without being read at all, which is
+              why a library can show far fewer files than the folder's properties. Costs an
+              extra directory listing per pruned folder — slow over SMB/rclone, so leave it off
+              unless you are investigating a mismatch.
             </span>
           </label>
         </div>

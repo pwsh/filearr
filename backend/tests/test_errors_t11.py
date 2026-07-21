@@ -114,12 +114,12 @@ async def _mk_library(maker, **kw):
 
 
 async def _mk_item(maker, library_id, rel_path, *, metadata=None, status="active"):
-    from filearr.models import Item, MediaType
+    from filearr.models import Item
 
     async with maker() as s:
         item = Item(
             library_id=library_id,
-            media_type=MediaType.video,
+            file_category="video", file_group="video",
             status=status,
             path=f"/d/{rel_path}",
             rel_path=rel_path,
@@ -222,7 +222,7 @@ async def test_per_run_counter_increments_atomically(wired, monkeypatch):
     def boom(_path):
         raise RuntimeError("nope")
 
-    monkeypatch.setitem(extract_mod.EXTRACTORS, extract_mod.MediaType.video, boom)
+    monkeypatch.setitem(extract_mod.EXTRACTOR_BY_KIND, "video", boom)
 
     await asyncio.gather(
         extract_mod.extract_item(str(id1), str(run_id)),
@@ -254,7 +254,7 @@ async def test_extract_error_is_sanitized_in_metadata(wired, monkeypatch):
     def boom(_path):
         raise RuntimeError("bad\x00\x1b[31mstuff")
 
-    monkeypatch.setitem(extract_mod.EXTRACTORS, extract_mod.MediaType.video, boom)
+    monkeypatch.setitem(extract_mod.EXTRACTOR_BY_KIND, "video", boom)
     await extract_mod.extract_item(str(iid))  # no scan_run_id -> still records error
 
     async with maker() as s:
@@ -274,7 +274,12 @@ async def test_scan_crash_retains_sanitized_error(wired, monkeypatch):
     maker = wired["maker"]
     monkeypatch.setattr(scan_mod, "SessionLocal", maker)
 
-    async def _boom_body(session, library, run, scope_rel=None):
+    # Signature must track scan_library's call into _scan_body. W9 added the
+    # `recursive` kwarg and this stub was not updated, so the call raised
+    # TypeError before reaching the assertions below — silently leaving
+    # architecture invariant 7 (a crashed scan MUST end `failed`, never
+    # `running`) untested. **kwargs keeps it from rotting again.
+    async def _boom_body(session, library, run, scope_rel=None, **kwargs):
         raise RuntimeError("scan exploded\x00 with control\x07 chars")
 
     monkeypatch.setattr(scan_mod, "_scan_body", _boom_body)

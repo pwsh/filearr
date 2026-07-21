@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/filearr/filearr/agent/internal/scan"
+	"github.com/filearr/filearr/agent/internal/taxonomy"
 )
 
 // ExecError is a query that PARSES but cannot be executed against the local
@@ -27,24 +27,30 @@ const (
 	// (tag / meta.<key> / cf.<name>). The central catalog owns tags and JSONB;
 	// the offline agent index deliberately does not (agent/docs/layout.md).
 	ErrUnsupportedFilter = "unsupported_filter"
-	// ErrUnknownKind: kind:<x> where <x> is not a known MediaType.
+	// ErrUnknownKind: kind:<x> where <x> is not a known file_category.
 	ErrUnknownKind = "unknown_kind"
+	// ErrUnknownGroup: group:<x> where <x> is not a known file_group.
+	ErrUnknownGroup = "unknown_group"
 )
 
-// validKinds is derived from the scan package's exported MediaType constants
-// (reuse, do not duplicate the EXT_MAP media-type vocabulary). A kind: filter
-// resolves directly against the persisted items.media_type column — the agent
-// records media_type at scan time, so no ext→type re-derivation is needed here.
-var validKinds = map[string]bool{
-	string(scan.MediaVideo):       true,
-	string(scan.MediaAudio):       true,
-	string(scan.MediaAudiobook):   true,
-	string(scan.MediaSample):      true,
-	string(scan.MediaImage):       true,
-	string(scan.MediaModel3D):     true,
-	string(scan.MediaDocument):    true,
-	string(scan.MediaSpreadsheet): true,
-	string(scan.MediaOther):       true,
+// validKinds / validGroups are derived from the BAKED-IN taxonomy seed's
+// file_category / file_group vocabularies (W8-E). A “kind:“ filter resolves
+// against items.file_category and “group:“ against items.file_group — the agent
+// records both at scan time, so no ext→type re-derivation is needed here. The
+// seed is the shipped default vocabulary; a locally-added custom category/group
+// is not offered here (the local CLI validates against the seed, like central's
+// static kind vocabulary before it).
+var (
+	validKinds  = keySet(taxonomy.SeedOrEmpty().CategoryKeys())
+	validGroups = keySet(taxonomy.SeedOrEmpty().GroupKeys())
+)
+
+func keySet(keys []string) map[string]bool {
+	m := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		m[k] = true
+	}
+	return m
 }
 
 // compiled is the parameterised translation of a Query against the local index.
@@ -158,10 +164,20 @@ func compileFilter(f Filter, now time.Time) (string, []any, *ExecError) {
 		if !validKinds[v] {
 			return "", nil, &ExecError{
 				Code:    ErrUnknownKind,
-				Message: fmt.Sprintf("unknown kind %q", v),
+				Message: fmt.Sprintf("unknown kind (file_category) %q", v),
 			}
 		}
-		return "items.media_type = ?", []any{v}, nil
+		return "items.file_category = ?", []any{v}, nil
+
+	case f.Key == "group":
+		v := f.Value.(StringValue).Value
+		if !validGroups[v] {
+			return "", nil, &ExecError{
+				Code:    ErrUnknownGroup,
+				Message: fmt.Sprintf("unknown group (file_group) %q", v),
+			}
+		}
+		return "items.file_group = ?", []any{v}, nil
 
 	case f.Key == "ext":
 		vals := f.Value.(ListValue).Values

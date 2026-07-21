@@ -1,13 +1,32 @@
 name: ci
 
-# CI gate: lint + backend tests + frontend check + alembic drift must all pass
-# BEFORE the docker image is built. The `image` build here is a no-push
-# validation only (release publishing lives in build.yml, on main/tags).
+# CI gate: lint + backend tests + frontend check + agent (Go) + alembic drift
+# must all pass BEFORE the docker image is built. The `image` build here is a
+# no-push validation only — release publishing lives in build.yml, which CALLS
+# this whole workflow (see `workflow_call` below) as its gate before pushing
+# to ghcr.io.
+#
+# Every `uses:` is pinned to a full commit SHA with the semver in a trailing
+# comment. A `@vN` tag is MUTABLE — whoever controls it can repoint it at any
+# commit, which then runs with this workflow's token and secrets. A SHA cannot
+# be moved. Keep the comment in sync with the SHA; .github/dependabot.yml bumps
+# both together, so take action upgrades as reviewable Dependabot PRs rather
+# than hand-editing a pin.
+#
+# Checkouts also set `persist-credentials: false` so the auto-injected
+# GITHUB_TOKEN is never persisted for later steps (and the third-party code
+# `npm ci` / `uv sync` / `go test` execute right after) to pick up. checkout v6+
+# stores it under $RUNNER_TEMP rather than .git/config, which narrows the
+# exposure but does not remove it — keep the flag.
 
 on:
   pull_request:
-  push:
-    branches: [main]
+  # Callable as a gate: build.yml runs this entire suite and waits on it before
+  # publishing to ghcr.io — on BOTH main pushes and v* tags (tags never
+  # triggered CI at all before this existed). Direct pushes to main get their
+  # CI through that call, so a separate `push: main` trigger here would just
+  # run everything twice per push.
+  workflow_call:
 
 # Cancel superseded runs on the same ref to save runner minutes.
 concurrency:
@@ -48,7 +67,9 @@ jobs:
       # creates one throwaway database per test module off it.
       FILEARR_TEST_DATABASE_URL: postgresql://filearr:filearr@localhost:5432/filearr
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
       - name: Install ffmpeg (ffprobe) + media libs for extractors
         run: |
@@ -56,12 +77,12 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             ffmpeg libmagic1 libmediainfo0v5
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
 
@@ -75,15 +96,17 @@ jobs:
         run: uv run pytest -q
 
   frontend:
-    name: frontend (svelte-check + build)
+    name: frontend (svelte-check + tests + build)
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           # Matches the Dockerfile's `node:24-slim` build stage.
           node-version: "24"
@@ -96,6 +119,15 @@ jobs:
       - name: Type/component check
         run: npm run check
 
+      # tests/ is outside tsconfig.json's `include` (the app config is
+      # browser-only), so these two gates are what keep the Node-runner tests
+      # honest. They ran nowhere before — not in package.json, not in CI.
+      - name: Type-check tests
+        run: npm run check:tests
+
+      - name: Unit tests
+        run: npm test
+
       - name: Build
         run: npm run build
 
@@ -106,9 +138,11 @@ jobs:
       run:
         working-directory: agent
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: agent/go.mod
           cache-dependency-path: agent/go.sum
@@ -154,14 +188,16 @@ jobs:
       # env.py resolves the DB URL from FILEARR_DATABASE_URL via filearr.config.
       FILEARR_DATABASE_URL: postgresql+psycopg://filearr:filearr@localhost:5432/filearr
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.13"
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
         with:
           enable-cache: true
 
@@ -179,14 +215,17 @@ jobs:
   image:
     name: docker image (no push)
     runs-on: ubuntu-latest
-    # True gate: only build the image once lint, tests, frontend, and migration
-    # drift have all passed.
-    needs: [backend, frontend, alembic-check]
+    # True gate: only build the image once EVERY suite has passed — backend,
+    # frontend, agent, and migration drift. (`agent` was missing here until
+    # 2026-07-20: a broken Go agent did not block the image build.)
+    needs: [backend, frontend, agent, alembic-check]
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
       - name: Build multi-stage image (validation only, no push)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: false

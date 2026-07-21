@@ -10,26 +10,26 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Media-type vocabulary (mirrors backend/filearr/models.py:MediaType values, as
-// stored on the agent's local items.media_type). Thumbnailable = image + audio
-// family + video. document(PDF) is DELIBERATELY excluded on the agent: pure-Go
-// PDF rasterization is not production-grade under CGO_ENABLED=0, so agent PDFs get
-// no thumbnail until a later slice (documented deviation). Central still generates
-// PDF thumbs for CENTRAL-hosted libraries.
+// File-category vocabulary (the File Extension Similarity Taxonomy coarse bucket,
+// stored on the agent's local items.file_category — W8-E). Thumbnailable = image
+// + audio + video. The old audiobook/sample media types now roll up under the
+// “audio“ category, so this triple still covers them. document(PDF) is
+// DELIBERATELY excluded on the agent: pure-Go PDF rasterization is not
+// production-grade under CGO_ENABLED=0, so agent PDFs get no thumbnail until a
+// later slice (documented deviation). Central still generates PDF thumbs for
+// CENTRAL-hosted libraries.
 const (
-	mediaImage     = "image"
-	mediaVideo     = "video"
-	mediaAudio     = "audio"
-	mediaAudiobook = "audiobook"
-	mediaSample    = "sample"
+	categoryImage = "image"
+	categoryVideo = "video"
+	categoryAudio = "audio"
 )
 
-// isThumbnailable reports whether the agent can produce a thumbnail for a media
-// type. Video is included only when ffmpeg is available (capability-gated by the
-// Thumbnailer); the type gate here is format-agnostic.
-func isThumbnailable(mediaType string) bool {
-	switch mediaType {
-	case mediaImage, mediaVideo, mediaAudio, mediaAudiobook, mediaSample:
+// isThumbnailable reports whether the agent can produce a thumbnail for a
+// file_category. Video is included only when ffmpeg is available (capability-gated
+// by the Thumbnailer); the category gate here is format-agnostic.
+func isThumbnailable(category string) bool {
+	switch category {
+	case categoryImage, categoryVideo, categoryAudio:
 		return true
 	default:
 		return false
@@ -43,13 +43,13 @@ func isThumbnailable(mediaType string) bool {
 // over a decoded frame; the pass filters these with the injected IsArtwork
 // classifier since the index package cannot import scan).
 type Candidate struct {
-	ItemID      string
-	RootPath    string
-	RelPath     string
-	MediaType   string
-	ContentHash string
-	QuickHash   string
-	SidecarRels []string
+	ItemID       string
+	RootPath     string
+	RelPath      string
+	FileCategory string
+	ContentHash  string
+	QuickHash    string
+	SidecarRels  []string
 }
 
 // hashUsed mirrors central generate_and_store: content_hash preferred, quick_hash
@@ -230,7 +230,7 @@ func (t *Thumbnailer) RunPass(ctx context.Context) (PassStats, error) {
 
 func (t *Thumbnailer) processCandidate(ctx context.Context, c Candidate, stats *PassStats) {
 	hash := c.hashUsed()
-	if hash == "" || !isThumbnailable(c.MediaType) {
+	if hash == "" || !isThumbnailable(c.FileCategory) {
 		return
 	}
 	markers, err := t.store.ThumbMarkers(ctx, c.ItemID)
@@ -302,16 +302,16 @@ func (t *Thumbnailer) generate(ctx context.Context, c Candidate, spec TierSpec) 
 	}
 
 	full := filepath.Join(c.RootPath, filepath.FromSlash(c.RelPath))
-	switch c.MediaType {
-	case mediaImage:
+	switch c.FileCategory {
+	case categoryImage:
 		return GenerateImageThumb(full, spec)
-	case mediaAudio, mediaAudiobook, mediaSample:
+	case categoryAudio:
 		raw := ExtractAudioCover(full)
 		if raw == nil {
 			return nil
 		}
 		return GenerateThumbFromBytes(raw, spec)
-	case mediaVideo:
+	case categoryVideo:
 		if t.ffmpegPath == "" {
 			if !t.loggedNoFFm {
 				t.log.Info("ffmpeg not found on PATH; agent video thumbnails disabled")

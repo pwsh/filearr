@@ -65,7 +65,7 @@ func seedCLIIndex(t *testing.T, path string) {
 	tx, _ = st.Begin(ctx)
 	id, _ := index.NewID()
 	it := &index.Item{ID: id, RootID: rid, RelPath: "Movies/Film.mkv", Filename: "Film.mkv",
-		Extension: "mkv", Size: 10, MtimeNs: now.UnixNano(), MediaType: "video",
+		Extension: "mkv", Size: 10, MtimeNs: now.UnixNano(), FileCategory: "video",
 		Status: index.StatusActive, FirstSeen: now, LastSeen: now}
 	if err := index.InsertItem(ctx, tx, it); err != nil {
 		t.Fatal(err)
